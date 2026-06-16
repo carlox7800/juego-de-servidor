@@ -33,9 +33,9 @@ io.on('connection', (socket) => {
         socket.join(roomId);
         console.log(`[🚪 ROOM] Cliente ${socket.id} se unió al canal de la sala: ${roomId}`);
         
-        // ¡LA PIEZA FALTANTE! Si la sala existe en memoria, avisarle a TODOS al instante
+        // ¡CORRECCIÓN!: Enviar solo el .data para que el teléfono lo pueda leer sin errores
         if (memoryDatabase[roomId]) {
-            io.to(roomId).emit('room_state_changed', memoryDatabase[roomId]);
+            io.to(roomId).emit('room_state_changed', memoryDatabase[roomId].data);
             console.log(`[⚡ WEBSOCKET] ¡Aviso de entrada enviado a toda la sala ${roomId}!`);
         }
     });
@@ -47,8 +47,8 @@ io.on('connection', (socket) => {
         if (memoryDatabase[roomId]) {
             memoryDatabase[roomId].data = data;
             
-            // Transmisión inmediata y exclusiva a los demás teléfonos de la sala
-            socket.to(roomId).emit('room_state_changed', memoryDatabase[roomId]);
+            // ¡CORRECCIÓN!: Enviar solo el .data para que el teléfono lo pueda leer sin errores
+            socket.to(roomId).emit('room_state_changed', memoryDatabase[roomId].data);
             console.log(`[⚡ WEBSOCKET] Estado redistribuido al instante en sala: ${roomId}`);
         }
     });
@@ -104,8 +104,8 @@ app.put('/objects/:id', (req, res) => {
     if (memoryDatabase[roomId]) {
         memoryDatabase[roomId].data = requestData.data;
         
-        // Sincroniza también vía WebSockets por si hay algún cliente escuchando el canal directo
-        io.to(roomId).emit('room_state_changed', memoryDatabase[roomId]);
+        // ¡CORRECCIÓN!: Sincroniza enviando solo el .data vía WebSockets
+        io.to(roomId).emit('room_state_changed', memoryDatabase[roomId].data);
         
         console.log(`[♻️ HTTP] Sala Actualizada vía PUT: ${roomId}`);
         res.json(memoryDatabase[roomId]);
