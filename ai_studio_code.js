@@ -32,6 +32,12 @@ io.on('connection', (socket) => {
     socket.on('join_room', (roomId) => {
         socket.join(roomId);
         console.log(`[🚪 ROOM] Cliente ${socket.id} se unió al canal de la sala: ${roomId}`);
+        
+        // ¡LA PIEZA FALTANTE! Si la sala existe en memoria, avisarle a TODOS al instante
+        if (memoryDatabase[roomId]) {
+            io.to(roomId).emit('room_state_changed', memoryDatabase[roomId]);
+            console.log(`[⚡ WEBSOCKET] ¡Aviso de entrada enviado a toda la sala ${roomId}!`);
+        }
     });
 
     // Escuchar actualizaciones en tiempo real (Dados, Turnos, Movimientos)
