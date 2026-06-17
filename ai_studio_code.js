@@ -13,6 +13,15 @@ const io = new Server(server, {
 // Base de datos en memoria
 const objectsStore = {};
 
+// FUNCIÓN AUXILIAR: Generar PIN de 6 dígitos único en el servidor
+function generateUniqueRoomId() {
+    let roomId;
+    do {
+        roomId = Math.floor(100000 + Math.random() * 900000).toString();
+    } while (objectsStore[roomId]);
+    return roomId;
+}
+
 // REST API para inicialización
 app.get('/objects/:id', (req, res) => {
     const roomId = req.params.id;
@@ -24,8 +33,19 @@ app.get('/objects/:id', (req, res) => {
 });
 
 app.post('/objects', (req, res) => {
-    const newRoom = req.body;
-    objectsStore[newRoom.id] = newRoom;
+    const requestBody = req.body;
+    
+    // El servidor genera el ID de forma autónoma si no viene uno válido desde el cliente
+    const roomId = requestBody.id || generateUniqueRoomId();
+    
+    const newRoom = {
+        id: roomId,
+        name: requestBody.name || "Nueva Sala",
+        data: requestBody.data || {},
+        createdAt: new Date().toISOString()
+    };
+    
+    objectsStore[roomId] = newRoom;
     res.status(201).json(newRoom);
 });
 
@@ -50,26 +70,22 @@ app.put('/objects/:id', (req, res) => {
     }
 });
 
-// WEBSOCKETS (Sincronización Pura y Rápida - Single Source of Truth)
+// WEBSOCKETS (Sincronización Pura)
 io.on('connection', (socket) => {
     console.log(`Socket conectado: ${socket.id}`);
 
-    // Unirse a la sala de Socket.IO
     socket.on('join_room', (roomId) => {
         socket.join(roomId);
         console.log(`Socket ${socket.id} se unió a la sala ${roomId}`);
     });
 
-    // Escuchar actualizaciones de estado de juego directas y rebotarlas
     socket.on('update_room_state', (payload) => {
         const { roomId, data } = payload;
         
-        // Sincronizar silenciosamente con el almacenamiento en memoria
         if (objectsStore[roomId]) {
             objectsStore[roomId].data = data;
         }
 
-        // Retransmisión ultrarrápida a todos los clientes (Sin cálculos de motor)
         io.in(roomId).emit('room_state_changed', data);
     });
 
