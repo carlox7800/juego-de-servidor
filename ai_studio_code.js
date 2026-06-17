@@ -54,10 +54,27 @@ app.put('/objects/:id', (req, res) => {
     const requestBody = req.body;
     
     if (objectsStore[roomId]) {
+        const currentData = objectsStore[roomId].data || {};
+        const newData = requestBody.data || {};
+        
+        // ESCUDO ANTI-BLOQUEO:
+        // Si el Host arranca la partida, la sala ya está en "PLAYING".
+        // Ignoramos la petición REST lenta para no aplastar el dado que ya empezó a rodar por WebSocket.
+        // Solo permitimos el PUT si es un jugador abandonando la partida (joinedPlayersCount menor).
+        if (currentData.status === "PLAYING" && newData.status === "PLAYING") {
+            const currentCount = currentData.joinedPlayersCount || 0;
+            const newCount = newData.joinedPlayersCount || 0;
+            
+            if (newCount >= currentCount) {
+                console.log(`Petición REST ignorada en sala ${roomId} para proteger los dados del Host.`);
+                return res.json(objectsStore[roomId]); 
+            }
+        }
+
         const updatedRoom = {
             id: roomId,
             name: requestBody.name || objectsStore[roomId].name,
-            data: requestBody.data || objectsStore[roomId].data,
+            data: newData,
             createdAt: objectsStore[roomId].createdAt
         };
         objectsStore[roomId] = updatedRoom;
