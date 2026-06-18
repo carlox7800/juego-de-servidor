@@ -94,6 +94,13 @@ io.on('connection', (socket) => {
     socket.on('join_room', (roomId) => {
         socket.join(roomId);
         console.log(`Socket ${socket.id} se unió a la sala ${roomId}`);
+        
+        // ¡SOLUCIÓN AL VALLE DE DESINCRONIZACIÓN (LATE-JOIN)!
+        // Si el Host arrancó la partida mientras este socket apenas se estaba conectando,
+        // le enviamos el estado "PLAYING" inmediatamente al terminar de conectar.
+        if (objectsStore[roomId]) {
+            socket.emit('room_state_changed', objectsStore[roomId].data);
+        }
     });
 
     socket.on('update_room_state', (payload) => {
