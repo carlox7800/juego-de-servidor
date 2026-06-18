@@ -58,9 +58,6 @@ app.put('/objects/:id', (req, res) => {
         const newData = requestBody.data || {};
         
         // ESCUDO ANTI-BLOQUEO:
-        // Si el Host arranca la partida, la sala ya está en "PLAYING".
-        // Ignoramos la petición REST lenta para no aplastar el dado que ya empezó a rodar por WebSocket.
-        // Solo permitimos el PUT si es un jugador abandonando la partida (joinedPlayersCount menor).
         if (currentData.status === "PLAYING" && newData.status === "PLAYING") {
             const currentCount = currentData.joinedPlayersCount || 0;
             const newCount = newData.joinedPlayersCount || 0;
@@ -91,13 +88,20 @@ app.put('/objects/:id', (req, res) => {
 io.on('connection', (socket) => {
     console.log(`Socket conectado: ${socket.id}`);
 
+    // === NUEVO: MEDIDOR DE LATENCIA NATIVA (PING/PONG) ===
+    socket.on('latency_ping', (clientTimestamp, callback) => {
+        // Si el cliente adjuntó un callback de Acknowledge, lo ejecutamos al instante
+        if (typeof callback === 'function') {
+            callback();
+        }
+    });
+    // ======================================================
+
     socket.on('join_room', (roomId) => {
         socket.join(roomId);
         console.log(`Socket ${socket.id} se unió a la sala ${roomId}`);
         
         // ¡SOLUCIÓN AL VALLE DE DESINCRONIZACIÓN (LATE-JOIN)!
-        // Si el Host arrancó la partida mientras este socket apenas se estaba conectando,
-        // le enviamos el estado "PLAYING" inmediatamente al terminar de conectar.
         if (objectsStore[roomId]) {
             socket.emit('room_state_changed', objectsStore[roomId].data);
         }
