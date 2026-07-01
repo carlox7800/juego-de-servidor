@@ -6,14 +6,19 @@ const app = express();
 app.use(express.json());
 
 const server = http.createServer(app);
+
+// === V17.6: ACELERADOR DE HEARTBEAT ===
+// Reducimos el tiempo máximo de espera a 9 segundos (4s intervalo + 5s tolerancia)
+// Si un teléfono pierde el internet de golpe, el servidor se dará cuenta al instante.
 const io = new Server(server, {
-    cors: { origin: "*" }
+    cors: { origin: "*" },
+    pingInterval: 4000,
+    pingTimeout: 5000
 });
 
 // Base de datos en memoria
 const objectsStore = {};
 
-// FUNCIÓN AUXILIAR: Generar PIN de 6 dígitos único en el servidor
 function generateUniqueRoomId() {
     let roomId;
     do {
@@ -22,7 +27,7 @@ function generateUniqueRoomId() {
     return roomId;
 }
 
-// REST API para inicialización
+// REST API
 app.get('/objects/:id', (req, res) => {
     const roomId = req.params.id;
     if (objectsStore[roomId]) {
@@ -34,8 +39,6 @@ app.get('/objects/:id', (req, res) => {
 
 app.post('/objects', (req, res) => {
     const requestBody = req.body;
-    
-    // El servidor genera el ID de forma autónoma si no viene uno válido desde el cliente
     const roomId = requestBody.id || generateUniqueRoomId();
     
     const newRoom = {
@@ -57,13 +60,13 @@ app.put('/objects/:id', (req, res) => {
         const currentData = objectsStore[roomId].data || {};
         const newData = requestBody.data || {};
         
-        // ESCUDO ANTI-BLOQUEO:
+        // ESCUDO ANTI-BLOQUEO
         if (currentData.status === "PLAYING" && newData.status === "PLAYING") {
             const currentCount = currentData.joinedPlayersCount || 0;
             const newCount = newData.joinedPlayersCount || 0;
             
             if (newCount >= currentCount) {
-                console.log(`Petición REST ignorada en sala ${roomId} para proteger los dados del Host.`);
+                console.log(`Petición REST ignorada en sala ${roomId} para proteger los dados.`);
                 return res.json(objectsStore[roomId]); 
             }
         }
@@ -76,7 +79,6 @@ app.put('/objects/:id', (req, res) => {
         };
         objectsStore[roomId] = updatedRoom;
         
-        // Retransmitir automáticamente el nuevo estado inicial a todos los sockets
         io.in(roomId).emit('room_state_changed', updatedRoom.data);
         res.json(updatedRoom);
     } else {
@@ -84,36 +86,27 @@ app.put('/objects/:id', (req, res) => {
     }
 });
 
-// WEBSOCKETS (Sincronización Pura y Detección de Caídas)
+// WEBSOCKETS
 io.on('connection', (socket) => {
     console.log(`Socket conectado: ${socket.id}`);
 
-    // === MEDIDOR DE LATENCIA NATIVA (PING/PONG) ===
     socket.on('latency_ping', (clientTimestamp, callback) => {
-        // Si el cliente adjuntó un callback de Acknowledge, lo ejecutamos al instante
         if (typeof callback === 'function') {
             callback();
         }
     });
-    // ==============================================
 
-    // === V17.5: JOIN ROOM CON IDENTIDAD ===
     socket.on('join_room', (payload) => {
-        // Compatibilidad híbrida: Extrae roomId y playerId si el cliente está actualizado (V17.5)
         const roomId = typeof payload === 'string' ? payload : payload.roomId;
         const playerId = typeof payload === 'string' ? null : payload.playerId;
         
         socket.join(roomId);
         
         if (playerId) {
-            console.log(`Socket ${socket.id} se unió a la sala ${roomId} con identidad de jugador: ${playerId}`);
-            // Guardar identidad en la memoria del socket
+            console.log(`Socket ${socket.id} se unió a la sala ${roomId} con identidad: ${playerId}`);
             socket.data = { roomId, playerId };
-        } else {
-            console.log(`Socket ${socket.id} se unió a la sala ${roomId} sin identidad (Legacy)`);
         }
         
-        // ¡SOLUCIÓN AL VALLE DE DESINCRONIZACIÓN (LATE-JOIN)!
         if (objectsStore[roomId]) {
             socket.emit('room_state_changed', objectsStore[roomId].data);
         }
@@ -121,41 +114,33 @@ io.on('connection', (socket) => {
 
     socket.on('update_room_state', (payload) => {
         const { roomId, data } = payload;
-        
         if (objectsStore[roomId]) {
             objectsStore[roomId].data = data;
         }
-
         io.in(roomId).emit('room_state_changed', data);
     });
 
-    // === V17.5: INTELIGENCIA DE DESCONEXIÓN ABRUPTA ===
     socket.on('disconnect', () => {
         console.log(`Socket desconectado: ${socket.id}`);
         
-        // Si el socket tenía una identidad registrada al unirse
         if (socket.data && socket.data.roomId && socket.data.playerId) {
             const { roomId, playerId } = socket.data;
             const room = objectsStore[roomId];
             
-            // Si la sala y la lista de jugadores existen
             if (room && room.data && room.data.players) {
-                // Buscamos si el jugador desconectado sigue en la sala
-                const playerIndex = room.data.players.findIndex(p => p.playerId === playerId);
+                // === V17.6: CORRECCIÓN DEL TYPO JSON (player_id) ===
+                const playerIndex = room.data.players.findIndex(p => p.player_id === playerId);
                 
                 if (playerIndex !== -1) {
-                    // 1. Lo extraemos forzosamente de la lista
                     room.data.players.splice(playerIndex, 1);
                     
-                    // 2. Mantenemos el contador de sala sincronizado
                     if (room.data.joinedPlayersCount !== undefined) {
                         room.data.joinedPlayersCount = room.data.players.length;
                     }
                     
-                    // 3. Avisamos DE INMEDIATO a los teléfonos sobrevivientes
                     io.in(roomId).emit('room_state_changed', room.data);
                     
-                    console.log(`[ESCUDO V17.5] Jugador ${playerId} extraído automáticamente de sala ${roomId} por caída de red. Servidor notificó al resto.`);
+                    console.log(`[ESCUDO V17.6] Jugador ${playerId} extraído de sala ${roomId} por caída de red en 9 segs.`);
                 }
             }
         }
@@ -164,5 +149,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Servidor Síncrono de Sweety Ludo ejecutándose en puerto ${PORT}`);
+    console.log(`Servidor de Ludo ejecutándose en puerto ${PORT}`);
 });
