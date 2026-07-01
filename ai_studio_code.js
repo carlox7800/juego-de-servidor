@@ -84,22 +84,34 @@ app.put('/objects/:id', (req, res) => {
     }
 });
 
-// WEBSOCKETS (Sincronización Pura)
+// WEBSOCKETS (Sincronización Pura y Detección de Caídas)
 io.on('connection', (socket) => {
     console.log(`Socket conectado: ${socket.id}`);
 
-    // === NUEVO: MEDIDOR DE LATENCIA NATIVA (PING/PONG) ===
+    // === MEDIDOR DE LATENCIA NATIVA (PING/PONG) ===
     socket.on('latency_ping', (clientTimestamp, callback) => {
         // Si el cliente adjuntó un callback de Acknowledge, lo ejecutamos al instante
         if (typeof callback === 'function') {
             callback();
         }
     });
-    // ======================================================
+    // ==============================================
 
-    socket.on('join_room', (roomId) => {
+    // === V17.5: JOIN ROOM CON IDENTIDAD ===
+    socket.on('join_room', (payload) => {
+        // Compatibilidad híbrida: Extrae roomId y playerId si el cliente está actualizado (V17.5)
+        const roomId = typeof payload === 'string' ? payload : payload.roomId;
+        const playerId = typeof payload === 'string' ? null : payload.playerId;
+        
         socket.join(roomId);
-        console.log(`Socket ${socket.id} se unió a la sala ${roomId}`);
+        
+        if (playerId) {
+            console.log(`Socket ${socket.id} se unió a la sala ${roomId} con identidad de jugador: ${playerId}`);
+            // Guardar identidad en la memoria del socket
+            socket.data = { roomId, playerId };
+        } else {
+            console.log(`Socket ${socket.id} se unió a la sala ${roomId} sin identidad (Legacy)`);
+        }
         
         // ¡SOLUCIÓN AL VALLE DE DESINCRONIZACIÓN (LATE-JOIN)!
         if (objectsStore[roomId]) {
@@ -117,8 +129,36 @@ io.on('connection', (socket) => {
         io.in(roomId).emit('room_state_changed', data);
     });
 
+    // === V17.5: INTELIGENCIA DE DESCONEXIÓN ABRUPTA ===
     socket.on('disconnect', () => {
         console.log(`Socket desconectado: ${socket.id}`);
+        
+        // Si el socket tenía una identidad registrada al unirse
+        if (socket.data && socket.data.roomId && socket.data.playerId) {
+            const { roomId, playerId } = socket.data;
+            const room = objectsStore[roomId];
+            
+            // Si la sala y la lista de jugadores existen
+            if (room && room.data && room.data.players) {
+                // Buscamos si el jugador desconectado sigue en la sala
+                const playerIndex = room.data.players.findIndex(p => p.playerId === playerId);
+                
+                if (playerIndex !== -1) {
+                    // 1. Lo extraemos forzosamente de la lista
+                    room.data.players.splice(playerIndex, 1);
+                    
+                    // 2. Mantenemos el contador de sala sincronizado
+                    if (room.data.joinedPlayersCount !== undefined) {
+                        room.data.joinedPlayersCount = room.data.players.length;
+                    }
+                    
+                    // 3. Avisamos DE INMEDIATO a los teléfonos sobrevivientes
+                    io.in(roomId).emit('room_state_changed', room.data);
+                    
+                    console.log(`[ESCUDO V17.5] Jugador ${playerId} extraído automáticamente de sala ${roomId} por caída de red. Servidor notificó al resto.`);
+                }
+            }
+        }
     });
 });
 
