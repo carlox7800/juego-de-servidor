@@ -62,6 +62,18 @@ app.put('/objects/:id', (req, res) => {
         const currentData = objectsStore[roomId].data || {};
         const newData = requestBody.data || {};
 
+        // V19.1: ESCUDO PROTECTOR DE ESTADO DE RED
+        // La propiedad is_connected es autoritativa del servidor.
+        const currentPlayers = currentData.players || [];
+        if (newData && Array.isArray(newData.players)) {
+            newData.players.forEach(newP => {
+                const existingP = currentPlayers.find(p => p.player_id === newP.player_id);
+                if (existingP && existingP.is_connected !== undefined) {
+                    newP.is_connected = existingP.is_connected;
+                }
+            });
+        }
+
         // ESCUDO ANTI-BLOQUEO & VERDUGO (V19.0)
         if (currentData.status === "PLAYING" && newData.status === "PLAYING") {
             const currentCount = currentData.joinedPlayersCount || 0;
@@ -167,6 +179,16 @@ io.on('connection', (socket) => {
     socket.on('update_room_state', (payload) => {
         const { roomId, data } = payload;
         if (objectsStore[roomId]) {
+            // V19.1: ESCUDO PROTECTOR DE ESTADO DE RED
+            const currentPlayers = objectsStore[roomId].data.players || [];
+            if (data && Array.isArray(data.players)) {
+                data.players.forEach(newP => {
+                    const existingP = currentPlayers.find(p => p.player_id === newP.player_id);
+                    if (existingP && existingP.is_connected !== undefined) {
+                        newP.is_connected = existingP.is_connected;
+                    }
+                });
+            }
             objectsStore[roomId].data = data;
         }
         io.in(roomId).emit('room_state_changed', data);
