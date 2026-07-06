@@ -8,15 +8,14 @@ app.use(express.json());
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: { origin: "*" },
-    // Versión 18.6 - Pings ultra agresivos para detectar caídas en 9 segundos
     pingInterval: 4000,
     pingTimeout: 5000
 });
 
-// Base de datos en memoria
+// Base de datos en memoria (Simulando REST)
+// Estructura: objectsStore[roomId] = { id, name, data: <LudoRoomState> }
 const objectsStore = {};
 
-// FUNCIÓN AUXILIAR: Generar PIN de 6 dígitos único en el servidor
 function generateUniqueRoomId() {
     let roomId;
     do {
@@ -25,11 +24,38 @@ function generateUniqueRoomId() {
     return roomId;
 }
 
-// REST API para inicialización
+// --- API REST PARA CREAR Y UNIR SALAS ---
+app.get('/', (req, res) => {
+    res.send("Ludo Server V18.9 is running");
+});
+
+app.post('/objects', (req, res) => {
+    const roomId = generateUniqueRoomId();
+    objectsStore[roomId] = {
+        id: roomId,
+        name: req.body.name || "",
+        data: req.body.data || {}
+    };
+    console.log(`[REST] Sala creada: ${roomId}`);
+    res.json(objectsStore[roomId]);
+});
+
 app.get('/objects/:id', (req, res) => {
     const roomId = req.params.id;
     if (objectsStore[roomId]) {
-        res.json({ id: roomId, ...objectsStore[roomId] });
+        res.json(objectsStore[roomId]);
+    } else {
+        res.status(404).json({ error: 'Sala no encontrada' });
+    }
+});
+
+app.put('/objects/:id', (req, res) => {
+    const roomId = req.params.id;
+    if (objectsStore[roomId]) {
+        objectsStore[roomId].name = req.body.name !== undefined ? req.body.name : objectsStore[roomId].name;
+        objectsStore[roomId].data = req.body.data !== undefined ? req.body.data : objectsStore[roomId].data;
+        console.log(`[REST] Sala actualizada vía PUT: ${roomId}`);
+        res.json(objectsStore[roomId]);
     } else {
         res.status(404).json({ error: 'Sala no encontrada' });
     }
@@ -39,194 +65,97 @@ app.get('/objects/:id', (req, res) => {
 io.on('connection', (socket) => {
     console.log(`[+] Cliente conectado: ${socket.id}`);
 
-    socket.on('join_room', (data) => {
-        let roomId = data.roomId;
-        const nickname = data.nickname || "Jugador";
-        const playerColor = data.color;
-        const playerId = data.playerId || socket.id;
-
-        // Validar límite global de 6 jugadores
-        if (roomId && objectsStore[roomId]) {
-            const currentPlayersCount = Object.keys(objectsStore[roomId].players || {}).length;
-            if (currentPlayersCount >= 6) {
-                // Verificar si es una reconexión (si el jugador ya estaba en la sala)
-                const existingPlayer = Object.values(objectsStore[roomId].players).find(p => p.playerId === playerId);
-                if (!existingPlayer) {
-                    socket.emit('room_error', { message: 'La sala está llena (máximo 6 jugadores)' });
-                    return;
-                }
-            }
-        }
-
-        if (!roomId) {
-            roomId = generateUniqueRoomId();
-            objectsStore[roomId] = {
-                createdAt: Date.now(),
-                players: {}
-            };
-            console.log(`[SALA] Creada nueva sala: ${roomId}`);
-        }
-
-        socket.join(roomId);
+    socket.on('join_room', (payload) => {
+        const roomId = payload.roomId;
+        const playerId = payload.playerId;
+        
         socket.roomId = roomId;
         socket.playerId = playerId;
+        socket.join(roomId);
 
-        if (!objectsStore[roomId]) {
-            objectsStore[roomId] = {
-                createdAt: Date.now(),
-                players: {}
-            };
-        }
+        console.log(`[SOCKET] ${playerId} se unió a la sala ${roomId}`);
 
-        // Versión 18.6 - Reconexión Inteligente
-        // Si el jugador ya existía en la memoria de la sala, actualizar su socketId y marcar is_connected
-        const existingPlayerKey = Object.keys(objectsStore[roomId].players).find(
-            key => objectsStore[roomId].players[key].playerId === playerId
-        );
-
-        if (existingPlayerKey) {
-            console.log(`[RECONEXIÓN] Jugador ${nickname} regresó a la sala ${roomId}`);
-            objectsStore[roomId].players[existingPlayerKey].socketId = socket.id;
-            objectsStore[roomId].players[existingPlayerKey].is_connected = true; // RECONECTADO
-        } else {
-            // Asignar el primer índice disponible del 0 al 5
-            let availableIndex = -1;
-            for (let i = 0; i < 6; i++) {
-                if (!objectsStore[roomId].players[i]) {
-                    availableIndex = i;
-                    break;
+        // Reconexión: Si el jugador ya existe en data.players, marcar isConnected = true
+        if (roomId && objectsStore[roomId] && objectsStore[roomId].data && objectsStore[roomId].data.players) {
+            let updated = false;
+            objectsStore[roomId].data.players.forEach(p => {
+                if (p.playerId === playerId) {
+                    p.isConnected = true;
+                    updated = true;
                 }
+            });
+            if (updated) {
+                console.log(`[RECONEXIÓN] Marcando isConnected=true para ${playerId}`);
+                io.to(roomId).emit('room_state_changed', objectsStore[roomId].data);
             }
-
-            if (availableIndex === -1) {
-                socket.emit('room_error', { message: 'La sala está llena' });
-                return;
-            }
-
-            objectsStore[roomId].players[availableIndex] = {
-                socketId: socket.id,
-                playerId: playerId,
-                nickname: nickname,
-                color: playerColor,
-                slotIndex: availableIndex,
-                is_connected: true // JUGADOR NUEVO (CONECTADO)
-            };
         }
-
-        // Emitir a todos en la sala el estado actualizado de los jugadores
-        io.to(roomId).emit('room_state_changed', objectsStore[roomId].players);
     });
 
-    // Enviar mensaje al chat general o de sala
+    // Android usa este evento para empujar cambios del tablero a todos los demás
+    socket.on('update_room_state', (payload) => {
+        const roomId = payload.roomId;
+        if (roomId && objectsStore[roomId]) {
+            objectsStore[roomId].data = payload.data;
+            // Emitir a TODOS en la sala para que sus pantallas se actualicen
+            io.to(roomId).emit('room_state_changed', objectsStore[roomId].data);
+        }
+    });
+
+    // --- EVENTOS PASSTHROUGH (Chat, Dados, Efectos) ---
     socket.on('chat_message', (data) => {
-        console.log(`[CHAT] Mensaje recibido en sala ${socket.roomId}:`, data);
-        if (socket.roomId) {
-            io.to(socket.roomId).emit('chat_message', data);
-        } else {
-            io.emit('chat_message', data);
-        }
+        if (socket.roomId) io.to(socket.roomId).emit('chat_message', data);
+        else io.emit('chat_message', data);
     });
-
-    // Compartir la configuración de la partida con todos en la sala
-    socket.on('share_match_config', (data) => {
-        if (socket.roomId) {
-            console.log(`[CONFIG] Compartiendo config en sala ${socket.roomId}`);
-            io.to(socket.roomId).emit('match_config_shared', data);
-        }
-    });
-
-    // Avisar que la partida ha comenzado (para cerrar los lobbys)
-    socket.on('start_game', () => {
-        if (socket.roomId) {
-            console.log(`[GAME] Iniciando partida en sala ${socket.roomId}`);
-            io.to(socket.roomId).emit('game_started');
-        }
-    });
-
-    // --- SINCRONIZACIÓN EN TIEMPO REAL DEL TABLERO ---
-
-    // Sincronizar Fichas (Posición, Progreso)
-    socket.on('sync_tokens', (data) => {
-        if (socket.roomId) {
-            socket.to(socket.roomId).emit('sync_tokens', data);
-        }
-    });
-
-    // Sincronizar el Jugador Activo (Turno)
-    socket.on('sync_turn', (data) => {
-        if (socket.roomId) {
-            socket.to(socket.roomId).emit('sync_turn', data);
-        }
-    });
-
-    // Sincronizar resultado del Dado
-    socket.on('sync_dice', (data) => {
-        if (socket.roomId) {
-            socket.to(socket.roomId).emit('sync_dice', data);
-        }
-    });
-
-    // Sincronizar Fichas Resaltadas (Ayuda visual)
-    socket.on('sync_highlights', (data) => {
-        if (socket.roomId) {
-            socket.to(socket.roomId).emit('sync_highlights', data);
-        }
-    });
-
-    // --- EFECTOS VISUALES Y DE SONIDO ---
     
-    // Reproducir sonido/efecto de Captura (Comer ficha)
+    socket.on('sync_tokens', (data) => {
+        if (socket.roomId) socket.to(socket.roomId).emit('sync_tokens', data);
+    });
+
+    socket.on('sync_turn', (data) => {
+        if (socket.roomId) socket.to(socket.roomId).emit('sync_turn', data);
+    });
+
+    socket.on('sync_dice', (data) => {
+        if (socket.roomId) socket.to(socket.roomId).emit('sync_dice', data);
+    });
+
+    socket.on('sync_highlights', (data) => {
+        if (socket.roomId) socket.to(socket.roomId).emit('sync_highlights', data);
+    });
+
     socket.on('play_capture_effect', () => {
-        if (socket.roomId) {
-            socket.to(socket.roomId).emit('play_capture_effect');
-        }
+        if (socket.roomId) socket.to(socket.roomId).emit('play_capture_effect');
     });
 
-    // Reproducir sonido/efecto de Coronación (Llegar al centro)
     socket.on('play_crown_effect', () => {
-        if (socket.roomId) {
-            socket.to(socket.roomId).emit('play_crown_effect');
-        }
+        if (socket.roomId) socket.to(socket.roomId).emit('play_crown_effect');
     });
 
-    // Sincronizar Reacciones/Emojis en el tablero
     socket.on('sync_reaction', (data) => {
-        if (socket.roomId) {
-            socket.to(socket.roomId).emit('sync_reaction', data);
-        }
+        if (socket.roomId) socket.to(socket.roomId).emit('sync_reaction', data);
     });
 
-    // Versión 18.6 - DESCONEXIÓN INTELIGENTE (is_connected: false)
+    socket.on('latency_ping', (start, callback) => {
+        callback();
+    });
+
+    // --- INTELIGENCIA DE DESCONEXIÓN PARA BOTS ---
     socket.on('disconnect', () => {
         console.log(`[-] Cliente desconectado: ${socket.id} (PlayerID: ${socket.playerId})`);
-        
         const roomId = socket.roomId;
-        if (roomId && objectsStore[roomId]) {
-            // Buscar la llave del jugador basándose en su playerId
-            const playerKey = Object.keys(objectsStore[roomId].players).find(
-                key => objectsStore[roomId].players[key].playerId === socket.playerId
-            );
-
-            if (playerKey) {
-                console.log(`[SALA] Jugador ${objectsStore[roomId].players[playerKey].nickname} marcado como DESCONECTADO (is_connected = false)`);
-                
-                // 1. Apagamos la bandera para que Android active el modo bot
-                objectsStore[roomId].players[playerKey].is_connected = false;
-
-                // 2. Avisamos inmediatamente a la sala
-                io.to(roomId).emit('room_state_changed', objectsStore[roomId].players);
-                
-                // 3. Programamos la destrucción diferida (10 minutos de limpieza basura)
-                // Si la sala está completamente vacía (todos is_connected === false), la borramos después.
-                setTimeout(() => {
-                    if (objectsStore[roomId]) {
-                        const allDisconnected = Object.values(objectsStore[roomId].players).every(p => p.is_connected === false);
-                        if (allDisconnected) {
-                            console.log(`[LIMPIEZA] Sala ${roomId} eliminada por inactividad total.`);
-                            delete objectsStore[roomId];
-                        }
-                    }
-                }, 600000); // 10 minutos
+        
+        if (roomId && objectsStore[roomId] && objectsStore[roomId].data && objectsStore[roomId].data.players) {
+            let updated = false;
+            objectsStore[roomId].data.players.forEach(p => {
+                if (p.playerId === socket.playerId) {
+                    p.isConnected = false;
+                    updated = true;
+                }
+            });
+            
+            if (updated) {
+                console.log(`[DESCONEXIÓN] Marcando isConnected=false para ${socket.playerId}`);
+                io.to(roomId).emit('room_state_changed', objectsStore[roomId].data);
             }
         }
     });
@@ -234,5 +163,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Servidor Node.js Ludo V18.6 corriendo en el puerto ${PORT}`);
+    console.log(`Servidor Node.js Ludo V18.9 corriendo en el puerto ${PORT}`);
 });
