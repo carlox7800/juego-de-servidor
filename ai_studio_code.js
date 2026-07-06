@@ -13,7 +13,6 @@ const io = new Server(server, {
 });
 
 // Base de datos en memoria (Simulando REST)
-// Estructura: objectsStore[roomId] = { id, name, data: <LudoRoomState> }
 const objectsStore = {};
 
 function generateUniqueRoomId() {
@@ -55,6 +54,10 @@ app.put('/objects/:id', (req, res) => {
         objectsStore[roomId].name = req.body.name !== undefined ? req.body.name : objectsStore[roomId].name;
         objectsStore[roomId].data = req.body.data !== undefined ? req.body.data : objectsStore[roomId].data;
         console.log(`[REST] Sala actualizada vía PUT: ${roomId}`);
+        
+        // ¡LA PIEZA FALTANTE! Avisar a todos los sockets que el estado cambió (Ej: Alguien se unió)
+        io.to(roomId).emit('room_state_changed', objectsStore[roomId].data);
+        
         res.json(objectsStore[roomId]);
     } else {
         res.status(404).json({ error: 'Sala no encontrada' });
@@ -96,7 +99,6 @@ io.on('connection', (socket) => {
         const roomId = payload.roomId;
         if (roomId && objectsStore[roomId]) {
             objectsStore[roomId].data = payload.data;
-            // Emitir a TODOS en la sala para que sus pantallas se actualicen
             io.to(roomId).emit('room_state_changed', objectsStore[roomId].data);
         }
     });
