@@ -6,10 +6,12 @@ const app = express();
 app.use(express.json());
 
 const server = http.createServer(app);
+
+// === V18.6: HEARTBEAT AJUSTADO ===
+// 4s intervalo + 5s tolerancia = 9s máximo para detectar caída de red
 const io = new Server(server, {
     cors: { origin: "*" },
-    // Pings agresivos para que Render y la red móvil detecten caídas en 10s
-    pingInterval: 5000,
+    pingInterval: 4000,
     pingTimeout: 5000
 });
 
@@ -60,18 +62,6 @@ app.put('/objects/:id', (req, res) => {
         const currentData = objectsStore[roomId].data || {};
         const newData = requestBody.data || {};
 
-        // ESCUDO ANTI-BLOQUEO: Ignorar escrituras REST que intenten reducir
-        // joinedPlayersCount mientras la partida está en curso. Protege los dados.
-        if (currentData.status === "PLAYING" && newData.status === "PLAYING") {
-            const currentCount = currentData.joinedPlayersCount || 0;
-            const newCount = newData.joinedPlayersCount || 0;
-
-            if (newCount >= currentCount) {
-                console.log(`[ESCUDO] Petición REST ignorada en sala ${roomId} (protegiendo estado de juego).`);
-                return res.json(objectsStore[roomId]);
-            }
-        }
-
         const updatedRoom = {
             id: roomId,
             name: requestBody.name || objectsStore[roomId].name,
@@ -79,7 +69,7 @@ app.put('/objects/:id', (req, res) => {
             createdAt: objectsStore[roomId].createdAt
         };
         objectsStore[roomId] = updatedRoom;
-        
+
         io.in(roomId).emit('room_state_changed', updatedRoom.data);
         res.json(updatedRoom);
     } else {
@@ -94,14 +84,14 @@ app.put('/objects/:id', (req, res) => {
 io.on('connection', (socket) => {
     console.log(`[WS] Socket conectado: ${socket.id}`);
 
-    // Medición de latencia (ping/pong)
+    // ── Medición de latencia (ping/pong) ──────────────────────────────────
     socket.on('latency_ping', (clientTimestamp, callback) => {
         if (typeof callback === 'function') {
             callback();
         }
     });
 
-    // Unirse / Reconectarse a una sala
+    // ── Unirse / Reconectarse a una sala ─────────────────────────────────
     socket.on('join_room', (payload) => {
         const roomId   = typeof payload === 'string' ? payload : payload.roomId;
         const playerId = typeof payload === 'string' ? null    : payload.playerId;
@@ -109,6 +99,7 @@ io.on('connection', (socket) => {
         socket.join(roomId);
 
         const room = objectsStore[roomId];
+
         if (playerId && room && room.data && Array.isArray(room.data.players)) {
 
             // ================================================================
@@ -121,7 +112,7 @@ io.on('connection', (socket) => {
             );
 
             if (existingIndex !== -1) {
-                // JUGADOR CONOCIDO: reactivar sin cambiar color ni slotIndex
+                // ── JUGADOR CONOCIDO: reactivar sin cambiar color ni slotIndex ──
                 const wasConnected = room.data.players[existingIndex].is_connected;
                 room.data.players[existingIndex].is_connected = true;
 
@@ -135,7 +126,7 @@ io.on('connection', (socket) => {
                 }
 
             } else {
-                // JUGADOR NUEVO: primera vez en la sala
+                // ── JUGADOR NUEVO: primera vez en la sala ──
                 console.log(`[JOIN] Nuevo jugador ${playerId} en sala ${roomId}.`);
                 socket.data = { roomId, playerId };
                 // El cliente Android ya añadió al jugador vía REST antes del socket;
@@ -154,109 +145,89 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Actualización de estado en tiempo real
+    // ── Actualización de estado en tiempo real ────────────────────────────
     socket.on('update_room_state', (payload) => {
         const { roomId, data } = payload;
         if (objectsStore[roomId]) {
-            // Reemplazamos la "data" por la nueva enviada desde el Android
             objectsStore[roomId].data = data;
         }
-        // Broadcast
         io.in(roomId).emit('room_state_changed', data);
     });
 
-    // Eventos passthrough
-    socket.on('chat_message', (data) => {
-        if (socket.data && socket.data.roomId) {
-            io.to(socket.data.roomId).emit('chat_message', data);
-        } else {
-            io.emit('chat_message', data);
-        }
-    });
-    
-    socket.on('sync_tokens', (data) => {
-        if (socket.data && socket.data.roomId) io.to(socket.data.roomId).emit('sync_tokens', data);
-    });
-
-    socket.on('sync_turn', (data) => {
-        if (socket.data && socket.data.roomId) io.to(socket.data.roomId).emit('sync_turn', data);
-    });
-
-    socket.on('sync_dice', (data) => {
-        if (socket.data && socket.data.roomId) io.to(socket.data.roomId).emit('sync_dice', data);
-    });
-
-    socket.on('sync_highlights', (data) => {
-        if (socket.data && socket.data.roomId) io.to(socket.data.roomId).emit('sync_highlights', data);
-    });
-    
-    socket.on('play_capture_effect', () => {
-        if (socket.data && socket.data.roomId) io.to(socket.data.roomId).emit('play_capture_effect');
-    });
-
-    socket.on('play_crown_effect', () => {
-        if (socket.data && socket.data.roomId) io.to(socket.data.roomId).emit('play_crown_effect');
-    });
-
-    socket.on('sync_reaction', (data) => {
-        if (socket.data && socket.data.roomId) io.to(socket.data.roomId).emit('sync_reaction', data);
-    });
-
-    // ================================================================
-    // V18.6 - DESCONEXIÓN INTELIGENTE (BANDERAS EN LUGAR DE BORRADO)
-    // ================================================================
+    // ── Desconexión del socket (pérdida de red o cierre de app) ──────────
     socket.on('disconnect', () => {
-        const { roomId, playerId } = socket.data || {};
-        if (roomId && playerId) {
+        console.log(`[WS] Socket desconectado: ${socket.id}`);
+
+        if (socket.data && socket.data.roomId && socket.data.playerId) {
+            const { roomId, playerId } = socket.data;
             const room = objectsStore[roomId];
-            
+
             if (room && room.data && Array.isArray(room.data.players)) {
-                
+
                 const playerIndex = room.data.players.findIndex(
                     p => p.player_id === playerId
                 );
 
                 if (playerIndex !== -1) {
                     const player = room.data.players[playerIndex];
-                    
-                    // En lugar de borrar (splice), lo mantenemos en su asiento y 
+
+                    // ============================================================
+                    // V18.6 - MARCAR COMO DESCONECTADO (NO BORRAR)
+                    //
+                    // Cambio crítico: en lugar de hacer splice() y destruir el
+                    // registro del jugador (color, slotIndex, etc.), simplemente
                     // marcamos is_connected: false.
                     //
                     // Beneficios:
-                    // 1. Android sabrá EXACTAMENTE quién se fue sin perder color ni posición.
-                    // 2. Android puede iniciar un temporizador de gracia y pasar el turno a un BOT.
-                    // 3. Si el jugador se reconecta luego, ocupará el MISMO ASIENTO.
+                    //   1. El cliente Android detecta la transición true→false
+                    //      y activa la fase de gracia normalmente.
+                    //   2. Al reconectarse, el servidor re-activa false→true
+                    //      conservando color y slotIndex originales.
+                    //   3. La Memoria Fotográfica del cliente ya no es necesaria
+                    //      porque el servidor nunca pierde la identidad del jugador.
+                    // ============================================================
                     room.data.players[playerIndex].is_connected = false;
 
                     // joinedPlayersCount refleja solo los jugadores activos
-                    room.data.joinedPlayersCount = room.data.players.filter(
-                        p => p.is_connected === true
-                    ).length;
-                    
-                    io.in(roomId).emit('room_state_changed', room.data);
-                    
-                    console.log(`[DESCONEXIÓN V18.6] Jugador ${playerId} marcado is_connected=false en sala ${roomId}. Color: ${player.color}, slot: ${player.slot_index}`);
+                    if (room.data.joinedPlayersCount !== undefined) {
+                        room.data.joinedPlayersCount = room.data.players.filter(
+                            p => p.is_connected === true
+                        ).length;
+                    }
 
-                    // Limpieza diferida de salas completamente vacías
-                    setTimeout(() => {
-                        const currentRoom = objectsStore[roomId];
-                        if (currentRoom && currentRoom.data && Array.isArray(currentRoom.data.players)) {
-                            const allDisconnected = currentRoom.data.players.every(
-                                p => p.is_connected === false
-                            );
-                            if (allDisconnected) {
-                                console.log(`[LIMPIEZA V18.6] Eliminando sala ${roomId} por inactividad total de 10 segs.`);
-                                delete objectsStore[roomId];
+                    io.in(roomId).emit('room_state_changed', room.data);
+
+                    console.log(`[DESCONEXIÓN V18.6] Jugador ${playerId} marcado is_connected=false en sala ${roomId}. Color: ${player.color}, Slot: ${player.slot_index}`);
+
+                    // ── Limpieza diferida de salas completamente vacías ──────
+                    // Si nadie sigue conectado tras 10 minutos, liberar memoria.
+                    const allDisconnected = room.data.players.every(
+                        p => p.is_connected === false
+                    );
+                    if (allDisconnected) {
+                        setTimeout(() => {
+                            const r = objectsStore[roomId];
+                            if (r && r.data && Array.isArray(r.data.players)) {
+                                const stillAllOff = r.data.players.every(
+                                    p => p.is_connected === false
+                                );
+                                if (stillAllOff) {
+                                    delete objectsStore[roomId];
+                                    console.log(`[LIMPIEZA] Sala ${roomId} eliminada (todos offline > 10 min).`);
+                                }
                             }
-                        }
-                    }, 10000);
+                        }, 10 * 60 * 1000); // 10 minutos
+                    }
                 }
             }
         }
     });
 });
 
+// =========================================================================
+// INICIO DEL SERVIDOR
+// =========================================================================
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Servidor Síncrono de Sweety Ludo V18 ejecutándose en puerto ${PORT}`);
+    console.log(`[SERVER] Sweety Ludo WebSocket Server v18.6 ejecutándose en puerto ${PORT}`);
 });
