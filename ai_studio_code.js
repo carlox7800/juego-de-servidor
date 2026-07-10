@@ -17,7 +17,7 @@ const activeRooms = {}; // roomId -> { id, mode, maxPlayers, players, currentTur
 const playerToRoom = {}; // socketId -> roomId
 
 app.get('/', (req, res) => {
-    res.send("<h1>Ludo Backend V20.1 AAA Server is running</h1>");
+    res.send("<h1>Ludo Backend V20.2 AAA Server is running</h1>");
 });
 
 function assignColors(players) {
@@ -49,13 +49,11 @@ function endTurn(roomId, playerId, hasExtraTurn) {
     if (!room) return;
     
     const activePlayer = room.players[room.currentTurnIndex];
-    if (activePlayer.playerId !== playerId) return; // ¡Sólo el jugador actual autorizado puede ceder su turno!
+    if (activePlayer.playerId !== playerId) return; 
     
     if (hasExtraTurn) {
-        // Mantiene el turno el jugador actual (por ej. saco pares)
         io.to(roomId).emit("event_turn_started", { playerId: activePlayer.playerId, slotIndex: activePlayer.slotIndex });
     } else {
-        // Pasa el turno al siguiente jugador de forma segura
         room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
         const nextPlayer = room.players[room.currentTurnIndex];
         io.to(roomId).emit("event_turn_started", { playerId: nextPlayer.playerId, slotIndex: nextPlayer.slotIndex });
@@ -65,7 +63,6 @@ function endTurn(roomId, playerId, hasExtraTurn) {
 io.on('connection', (socket) => {
     console.log(`[AAA] Socket conectado: ${socket.id}`);
 
-    // Registro inicial opcional
     socket.on("register_identity", (data) => {
         console.log(`[AAA] Identidad registrada: ${data.playerId} -> ${socket.id}`);
     });
@@ -79,7 +76,6 @@ io.on('connection', (socket) => {
         let queue = matchmakingQueues[targetPlayers] || [];
         matchmakingQueues[targetPlayers] = queue;
         
-        // Evitar duplicados del mismo jugador
         const existing = queue.find(p => p.playerId === playerId);
         if (!existing) {
             queue.push({ socketId: socket.id, playerId, playerName, isReady: false, isConnected: true });
@@ -110,7 +106,6 @@ io.on('connection', (socket) => {
             io.to(roomId).emit("match_found", activeRooms[roomId]);
             console.log(`[AAA] Emparejamiento exitoso: ${roomId} con ${targetPlayers} jugadores.`);
             
-            // Iniciar juego automáticamente en Casual
             setTimeout(() => {
                 activeRooms[roomId].players.forEach(p => p.isReady = true);
                 startGame(roomId);
@@ -122,9 +117,10 @@ io.on('connection', (socket) => {
     // 2. SALAS PRIVADAS (JUGAR CON AMIGOS)
     // =========================================================
     socket.on("create_private_room", (data) => {
-        // V20.1 FIX: Leemos el UUID correcto enviado desde Android
         const { playerId, playerName, mode, maxPlayers } = data;
-        const code = Math.random().toString(36).substring(2, 8).toUpperCase(); 
+        
+        // V20.2 FIX: Generador de código estrictamente numérico de 6 dígitos
+        const code = Math.floor(100000 + Math.random() * 900000).toString(); 
         
         socket.join(code);
         playerToRoom[socket.id] = code;
@@ -153,7 +149,6 @@ io.on('connection', (socket) => {
     });
 
     socket.on("join_private_room", (data) => {
-        // V20.1 FIX: Leemos el UUID correcto del jugador invitado
         const { code, playerId, playerName } = data;
         const room = activeRooms[code];
         
@@ -197,7 +192,7 @@ io.on('connection', (socket) => {
     });
 
     // =========================================================
-    // 3. JUGABILIDAD Y TURNOS (MOTOR V20.1)
+    // 3. JUGABILIDAD Y TURNOS (MOTOR V20.2)
     // =========================================================
     socket.on("intent_roll_dice", (data) => {
         const { roomId, playerId } = data;
@@ -222,9 +217,6 @@ io.on('connection', (socket) => {
             newPathIndex,
             isBotMove
         });
-        
-        // V20.1 FIX: El temporizador tóxico de robo de turno fue destruido. 
-        // El cliente Android ahora controla de forma 100% segura el agotamiento de movimientos.
     });
 
     socket.on("intent_end_turn", (data) => {
@@ -233,7 +225,7 @@ io.on('connection', (socket) => {
     });
 
     // =========================================================
-    // 4. MÓDULO DE CHAT Y EMOJIS (V20.1)
+    // 4. MÓDULO DE CHAT Y EMOJIS (V20.2)
     // =========================================================
     socket.on("intent_chat", (data) => {
         const { roomId, playerId, message } = data;
@@ -285,7 +277,6 @@ io.on('connection', (socket) => {
             delete playerToRoom[socket.id];
         }
         
-        // Limpiar matchmaking si estaba en cola
         for (let target in matchmakingQueues) {
             matchmakingQueues[target] = matchmakingQueues[target].filter(p => p.socketId !== socket.id);
         }
@@ -294,5 +285,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`[AAA] Ludo Backend V20.1 escuchando en el puerto ${PORT}`);
+    console.log(`[AAA] Ludo Backend V20.2 escuchando en el puerto ${PORT}`);
 });
