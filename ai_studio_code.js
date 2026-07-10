@@ -47,6 +47,7 @@ function startGame(roomId) {
     io.to(roomId).emit("match_found", room);
     
     // Iniciar el primer turno
+    // Se aumentó a 3000ms para dar tiempo a la UI de mostrar los jugadores antes de saltar
     setTimeout(() => {
         const activePlayer = room.players[room.currentTurnIndex];
         io.to(roomId).emit("event_turn_started", { playerId: activePlayer.playerId, slotIndex: activePlayer.slotIndex });
@@ -54,7 +55,7 @@ function startGame(roomId) {
         if (activePlayer.isBot || !activePlayer.isConnected) {
             processServerBotTurn(roomId, activePlayer);
         }
-    }, 1500);
+    }, 3000);
 }
 
 // ==========================================
@@ -67,28 +68,31 @@ function processServerBotTurn(roomId, botPlayer) {
     console.log(`[AAA] El Servidor asume el turno del bot/desconectado: ${botPlayer.playerName} en sala ${roomId}`);
 
     setTimeout(() => {
-        // El servidor tira el dado mágicamente
-        const diceVal = Math.floor(Math.random() * 6) + 1;
-        io.to(roomId).emit("event_dice_result", { playerId: botPlayer.playerId, diceValue: diceVal });
+        // MODIFICACIÓN: El servidor tira DOS dados mágicamente
+        const d1 = Math.floor(Math.random() * 6) + 1;
+        const d2 = Math.floor(Math.random() * 6) + 1;
+        
+        io.to(roomId).emit("event_dice_result", { 
+            playerId: botPlayer.playerId, 
+            diceValue: d1, // Retrocompatibilidad
+            diceValues: [d1, d2] // Nuevo formato de 2 dados
+        });
 
-        // El servidor necesita saber el mapa del tablero.
-        // Como el tablero es complejo (Safe zones, globos, etc), le preguntamos a un cliente vivo (Oráculo).
         const aliveOracle = room.players.find(p => p.isConnected && !p.isBot);
         
         if (aliveOracle) {
-            // Le pedimos al Oráculo que nos resuelva la jugada matemática
             const oracleSocketId = Object.keys(playerIdentities).find(key => playerIdentities[key] === aliveOracle.playerId);
             if (oracleSocketId) {
                 console.log(`[AAA] Consultando Oráculo (${aliveOracle.playerName}) para mover al bot ${botPlayer.playerName}`);
                 io.to(oracleSocketId).emit("rpc_request_bot_move", {
                     botPlayerId: botPlayer.playerId,
-                    diceValue: diceVal
+                    diceValue: d1,
+                    diceValues: [d1, d2]
                 });
             } else {
                 endTurn(roomId, botPlayer.playerId, false);
             }
         } else {
-            // Todos son bots o están desconectados. Cerramos la sala.
             console.log(`[AAA] Sala ${roomId} es un pueblo fantasma. Destruyendo sala.`);
             delete activeRooms[roomId];
         }
@@ -265,9 +269,17 @@ io.on("connection", (socket) => {
     // ----------------------------------------------------
     socket.on("intent_roll_dice", (data) => {
         const { roomId, playerId } = data;
-        const diceVal = Math.floor(Math.random() * 6) + 1;
-        console.log(`[AAA] ${playerId} tiró un ${diceVal} en ${roomId}`);
-        io.to(roomId).emit("event_dice_result", { playerId, diceValue: diceVal });
+        
+        // MODIFICACIÓN: TIRA 2 DADOS
+        const d1 = Math.floor(Math.random() * 6) + 1;
+        const d2 = Math.floor(Math.random() * 6) + 1;
+        
+        console.log(`[AAA] ${playerId} tiró un ${d1} y un ${d2} en ${roomId}`);
+        io.to(roomId).emit("event_dice_result", { 
+            playerId, 
+            diceValue: d1, // Retrocompatibilidad
+            diceValues: [d1, d2] // Nuevo formato de 2 dados
+        });
     });
 
     socket.on("intent_move_token", (data) => {
@@ -324,5 +336,5 @@ io.on("connection", (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`[AAA] Sweety Ludo Servidor Autoritativo V19.9 corriendo en puerto ${PORT}`);
+    console.log(`[AAA] Sweety Ludo Servidor Autoritativo V20.0 corriendo en puerto ${PORT}`);
 });
