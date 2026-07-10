@@ -22,7 +22,7 @@ app.use(express.json());
 
 // Express Health Check Route (For Render)
 app.get("/", (req, res) => {
-    res.send("Sweety Ludo Server V20.2 is running. Ready for real-time multiplayer connections.");
+    res.send("Sweety Ludo Server V20.4 is running. Ready for real-time multiplayer connections.");
 });
 
 // ==========================================
@@ -38,7 +38,7 @@ const matchmakingQueue = {};
 const playerToRoom = {};
 
 // -----------------------------------------------------
-// HELPER: Generate 6-Digit Numeric Code (Fix for V20.2)
+// HELPER: Generate 6-Digit Numeric Code (Fix for V20.2/V20.4)
 // -----------------------------------------------------
 function generateNumericRoomCode() {
     return Math.floor(100000 + Math.random() * 900000).toString(); 
@@ -91,7 +91,8 @@ io.on("connection", (socket) => {
         
         if (room) {
             if (room.players.length >= room.maxPlayers) {
-                socket.emit("room_error", "La sala está llena.");
+                // V20.4 FIX: Send error as object to prevent ClassCastException on client
+                socket.emit("room_error", { message: "La sala está llena." });
                 return;
             }
 
@@ -119,7 +120,8 @@ io.on("connection", (socket) => {
                 }, 3000);
             }
         } else {
-            socket.emit("room_error", "Sala no encontrada o código inválido.");
+            // V20.4 FIX: Send error as object
+            socket.emit("room_error", { message: "Sala no encontrada o código inválido." });
         }
     });
 
@@ -276,7 +278,7 @@ io.on("connection", (socket) => {
     });
 
     // =========================================================
-    // 4. CHAT MODULE (V20.2)
+    // 4. CHAT MODULE
     // =========================================================
     socket.on("intent_chat", (data) => {
         const { roomId, playerId, message } = data;
@@ -322,7 +324,7 @@ io.on("connection", (socket) => {
 
 server.listen(PORT, () => {
     console.log(`=================================`);
-    console.log(`🚀 Sweety Ludo Server V20.2 Started`);
+    console.log(`🚀 Sweety Ludo Server V20.4 Started`);
     console.log(`📡 Listening on port ${PORT}`);
     console.log(`=================================`);
 });
