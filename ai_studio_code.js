@@ -3,200 +3,319 @@ const http = require('http');
 const { Server } = require('socket.io');
 
 const app = express();
-const server = http.createServer(app);
+app.use(express.json());
 
-// AAA Server Settings: Heartbeat rápido para cortes en máx 9 segundos
+const server = http.createServer(app);
 const io = new Server(server, {
     cors: { origin: "*" },
     pingInterval: 4000,
     pingTimeout: 5000
 });
 
-// ============================================================================
-// ESTADO AUTORITATIVO (MEMORY DB)
-// ============================================================================
-const matchmakingQueue = [];
-const activeRooms = {};
-const playerToRoomMap = {};
+// ==========================================
+// ESTADO EN MEMORIA (AAA AUTORITATIVO)
+// ==========================================
+const matchmakingQueues = {}; // key: mode_targetPlayers -> value: [{socketId, playerId, playerName}]
+const activeRooms = {}; // key: roomId -> value: roomData
+const playerToRoom = {}; // key: socketId -> value: roomId
+const playerIdentities = {}; // key: socketId -> value: playerId
 
-function generateRoomId() {
+// ==========================================
+// UTILIDADES
+// ==========================================
+function generateRoomCode() {
     return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
-function getNextTurn(room) {
-    let nextIndex = (room.currentTurnIndex + 1) % room.players.length;
-    room.currentTurnIndex = nextIndex;
-    room.turnState = 'AWAITING_ROLL';
-    return room.players[nextIndex].playerId;
+function assignColors(players) {
+    const colors = ["ROJO", "AZUL", "AMARILLO", "VERDE", "NARANJA", "MORADO"];
+    players.forEach((p, index) => {
+        p.color = colors[index % colors.length];
+        p.slotIndex = index;
+    });
 }
 
-// ============================================================================
-// MOTOR DE BOTS DEL SERVIDOR (LA SOLUCIÓN A LOS BLOQUEOS DE HILOS)
-// ============================================================================
-function processServerBotTurn(roomId) {
+function startGame(roomId) {
     const room = activeRooms[roomId];
-    if (!room || room.status !== 'PLAYING') return;
-
-    const currentPlayer = room.players[room.currentTurnIndex];
-    if (currentPlayer.isConnected) return; // Si hay humano, cancela el bot
-
-    console.log(`[BOT ENGINE] Turno automático para ${currentPlayer.playerId} (Sala ${roomId})`);
+    if (!room) return;
     
-    // 1. El Servidor lanza el dado después de 2 segundos (Simula pensamiento)
+    room.status = "PLAYING";
+    room.currentTurnIndex = 0; // Empieza el host o el primero
+
+    console.log(`[AAA] Sala ${roomId} lista. Iniciando partida con ${room.players.length} jugadores.`);
+    
+    io.to(roomId).emit("match_found", room);
+    
+    // Iniciar el primer turno
     setTimeout(() => {
-        const roomContext = activeRooms[roomId];
-        if (!roomContext || roomContext.turnState !== 'AWAITING_ROLL') return;
-
-        const diceValue = Math.floor(Math.random() * 6) + 1;
-        roomContext.turnState = 'AWAITING_MOVE';
+        const activePlayer = room.players[room.currentTurnIndex];
+        io.to(roomId).emit("event_turn_started", { playerId: activePlayer.playerId, slotIndex: activePlayer.slotIndex });
         
-        io.in(roomId).emit('event_dice_result', {
-            playerId: currentPlayer.playerId,
-            diceValue: diceValue,
-            isBotRoll: true
-        });
+        if (activePlayer.isBot || !activePlayer.isConnected) {
+            processServerBotTurn(roomId, activePlayer);
+        }
+    }, 1500);
+}
 
-        // 2. Patrón Oráculo: Pedimos a un cliente vivo que valide el movimiento en el tablero
-        const connectedOracle = roomContext.players.find(p => p.isConnected);
-        if (connectedOracle) {
-            io.to(connectedOracle.socketId).emit('rpc_request_bot_move', {
-                botPlayerId: currentPlayer.playerId,
-                diceValue: diceValue
-            });
+// ==========================================
+// LÓGICA DE BOTS (ORÁCULO)
+// ==========================================
+function processServerBotTurn(roomId, botPlayer) {
+    const room = activeRooms[roomId];
+    if (!room) return;
+
+    console.log(`[AAA] El Servidor asume el turno del bot/desconectado: ${botPlayer.playerName} en sala ${roomId}`);
+
+    setTimeout(() => {
+        // El servidor tira el dado mágicamente
+        const diceVal = Math.floor(Math.random() * 6) + 1;
+        io.to(roomId).emit("event_dice_result", { playerId: botPlayer.playerId, diceValue: diceVal });
+
+        // El servidor necesita saber el mapa del tablero.
+        // Como el tablero es complejo (Safe zones, globos, etc), le preguntamos a un cliente vivo (Oráculo).
+        const aliveOracle = room.players.find(p => p.isConnected && !p.isBot);
+        
+        if (aliveOracle) {
+            // Le pedimos al Oráculo que nos resuelva la jugada matemática
+            const oracleSocketId = Object.keys(playerIdentities).find(key => playerIdentities[key] === aliveOracle.playerId);
+            if (oracleSocketId) {
+                console.log(`[AAA] Consultando Oráculo (${aliveOracle.playerName}) para mover al bot ${botPlayer.playerName}`);
+                io.to(oracleSocketId).emit("rpc_request_bot_move", {
+                    botPlayerId: botPlayer.playerId,
+                    diceValue: diceVal
+                });
+            } else {
+                endTurn(roomId, botPlayer.playerId, false);
+            }
         } else {
-            console.log(`[BOT ENGINE] Sala ${roomId} quedó vacía. Destruyendo...`);
+            // Todos son bots o están desconectados. Cerramos la sala.
+            console.log(`[AAA] Sala ${roomId} es un pueblo fantasma. Destruyendo sala.`);
             delete activeRooms[roomId];
         }
     }, 2000);
 }
 
-// ============================================================================
-// WEBSOCKETS (EVENT-DRIVEN AAA)
-// ============================================================================
-io.on('connection', (socket) => {
-    console.log(`[WS] Nuevo cliente conectado: ${socket.id}`);
+function endTurn(roomId, playerId, hasExtraTurn) {
+    const room = activeRooms[roomId];
+    if (!room) return;
 
-    // ── 1. MATCHMAKING CENTRALIZADO ─────────────────────────────────────────
-    socket.on('join_matchmaking', (payload) => {
-        const { playerId, playerName, mode, targetPlayers } = payload;
-        if (matchmakingQueue.find(p => p.playerId === playerId)) return;
-
-        matchmakingQueue.push({ socketId: socket.id, playerId, playerName, mode, targetPlayers });
-        console.log(`[MATCH] ${playerName} entró. Total cola: ${matchmakingQueue.length}`);
-
-        const compatibles = matchmakingQueue.filter(p => p.mode === mode && p.targetPlayers === targetPlayers);
+    if (hasExtraTurn) {
+        // Repite turno
+        const activePlayer = room.players[room.currentTurnIndex];
+        io.to(roomId).emit("event_turn_started", { playerId: activePlayer.playerId, slotIndex: activePlayer.slotIndex });
+        if (activePlayer.isBot || !activePlayer.isConnected) {
+            processServerBotTurn(roomId, activePlayer);
+        }
+    } else {
+        // Pasa turno
+        room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
+        const nextPlayer = room.players[room.currentTurnIndex];
+        io.to(roomId).emit("event_turn_started", { playerId: nextPlayer.playerId, slotIndex: nextPlayer.slotIndex });
         
-        if (compatibles.length >= targetPlayers) {
-            const roomPlayers = compatibles.slice(0, targetPlayers);
-            const roomId = generateRoomId();
+        if (nextPlayer.isBot || !nextPlayer.isConnected) {
+            processServerBotTurn(roomId, nextPlayer);
+        }
+    }
+}
+
+// ==========================================
+// SOCKET.IO EVENTS
+// ==========================================
+io.on("connection", (socket) => {
+    console.log(`[AAA] Nuevo cliente conectado: ${socket.id}`);
+
+    // Registro de Identidad
+    socket.on("register_identity", (data) => {
+        playerIdentities[socket.id] = data.playerId;
+    });
+
+    // ----------------------------------------------------
+    // MATCHMAKING PÚBLICO (Partida Rápida)
+    // ----------------------------------------------------
+    socket.on("join_matchmaking", (data) => {
+        const { playerId, playerName, mode, targetPlayers } = data;
+        const queueKey = `${mode}_${targetPlayers}`;
+        
+        if (!matchmakingQueues[queueKey]) {
+            matchmakingQueues[queueKey] = [];
+        }
+
+        // Evitar duplicados
+        if (!matchmakingQueues[queueKey].find(p => p.playerId === playerId)) {
+            matchmakingQueues[queueKey].push({ socketId: socket.id, playerId, playerName });
+        }
+
+        console.log(`[AAA] ${playerName} buscando partida ${queueKey}. Cola actual: ${matchmakingQueues[queueKey].length}/${targetPlayers}`);
+
+        // Emparejar si hay suficientes
+        if (matchmakingQueues[queueKey].length >= targetPlayers) {
+            const matchedGroup = matchmakingQueues[queueKey].splice(0, targetPlayers);
+            const roomId = `room_${Date.now()}_${Math.floor(Math.random()*1000)}`;
             
-            roomPlayers.forEach(p => {
-                const idx = matchmakingQueue.findIndex(mq => mq.playerId === p.playerId);
-                if (idx !== -1) matchmakingQueue.splice(idx, 1);
-            });
+            const players = matchedGroup.map(p => ({
+                playerId: p.playerId,
+                playerName: p.playerName,
+                isConnected: true,
+                isBot: false,
+                isReady: true
+            }));
+
+            assignColors(players);
 
             activeRooms[roomId] = {
-                id: roomId, status: 'PLAYING', mode: mode,
-                players: roomPlayers.map((p, i) => ({
-                    socketId: p.socketId, playerId: p.playerId,
-                    playerName: p.playerName, isConnected: true, slotIndex: i
-                })),
-                currentTurnIndex: 0, turnState: 'AWAITING_ROLL'
+                id: roomId,
+                mode: mode,
+                targetPlayers: targetPlayers,
+                status: "LOBBY",
+                players: players,
+                currentTurnIndex: 0
             };
 
-            roomPlayers.forEach(p => {
+            // Unir a todos a la sala de socket
+            matchedGroup.forEach(p => {
                 const s = io.sockets.sockets.get(p.socketId);
-                if (s) s.join(roomId);
-                playerToRoomMap[p.playerId] = roomId;
+                if (s) {
+                    s.join(roomId);
+                    playerToRoom[s.id] = roomId;
+                }
             });
 
-            console.log(`[MATCH] Sala ${roomId} creada. Arrancando...`);
-            io.in(roomId).emit('match_found', activeRooms[roomId]);
-
-            setTimeout(() => {
-                io.in(roomId).emit('event_turn_started', { playerId: activeRooms[roomId].players[0].playerId });
-            }, 3000);
+            startGame(roomId);
         }
     });
 
-    // ── 2. MOTOR DE EVENTOS POR INTENCIÓN (CERO JSON MASIVOS) ───────────────
-    socket.on('intent_roll_dice', (payload) => {
-        const room = activeRooms[payload.roomId];
-        if (room && room.status === 'PLAYING') {
-            const currentPlayer = room.players[room.currentTurnIndex];
-            if (currentPlayer.playerId === payload.playerId && room.turnState === 'AWAITING_ROLL') {
-                const diceValue = Math.floor(Math.random() * 6) + 1;
-                room.turnState = 'AWAITING_MOVE';
-                io.in(room.id).emit('event_dice_result', {
-                    playerId: payload.playerId, diceValue: diceValue, isBotRoll: false
-                });
-            }
+    // ----------------------------------------------------
+    // SALAS PRIVADAS (Jugar con Amigos)
+    // ----------------------------------------------------
+    socket.on("create_private_room", (data) => {
+        const { playerId, playerName, targetPlayers } = data;
+        const code = generateRoomCode();
+        
+        const player = {
+            playerId: playerId,
+            playerName: playerName,
+            isConnected: true,
+            isBot: false,
+            isReady: true
+        };
+
+        assignColors([player]);
+
+        activeRooms[code] = {
+            id: code,
+            mode: "FRIEND",
+            targetPlayers: targetPlayers || 2,
+            status: "LOBBY",
+            players: [player],
+            currentTurnIndex: 0
+        };
+
+        socket.join(code);
+        playerToRoom[socket.id] = code;
+        
+        console.log(`[AAA] Sala Privada Creada: ${code} por ${playerName}`);
+        socket.emit("private_room_created", { roomCode: code, roomData: activeRooms[code] });
+    });
+
+    socket.on("join_private_room", (data) => {
+        const { playerId, playerName, roomCode } = data;
+        const room = activeRooms[roomCode];
+
+        if (!room) {
+            socket.emit("room_error", { message: "La sala no existe o el código es incorrecto." });
+            return;
+        }
+
+        if (room.status !== "LOBBY") {
+            socket.emit("room_error", { message: "La partida ya ha comenzado." });
+            return;
+        }
+
+        if (room.players.length >= room.targetPlayers) {
+            socket.emit("room_error", { message: "La sala está llena." });
+            return;
+        }
+
+        const player = {
+            playerId: playerId,
+            playerName: playerName,
+            isConnected: true,
+            isBot: false,
+            isReady: true
+        };
+
+        room.players.push(player);
+        assignColors(room.players);
+
+        socket.join(roomCode);
+        playerToRoom[socket.id] = roomCode;
+        
+        console.log(`[AAA] ${playerName} se unió a la sala privada ${roomCode}`);
+
+        // Notificar al host que alguien entró (para la UI del lobby)
+        io.to(roomCode).emit("room_updated", room);
+
+        if (room.players.length === room.targetPlayers) {
+            startGame(roomCode);
         }
     });
 
-    socket.on('intent_move_token', (payload) => {
-        const room = activeRooms[payload.roomId];
-        if (room && room.status === 'PLAYING') {
-            const currentPlayer = room.players[room.currentTurnIndex];
-            if (currentPlayer.playerId === payload.playerId && room.turnState === 'AWAITING_MOVE') {
-                io.in(room.id).emit('event_token_moved', payload);
-            }
-        }
+    // ----------------------------------------------------
+    // JUGABILIDAD AAA (Intents)
+    // ----------------------------------------------------
+    socket.on("intent_roll_dice", (data) => {
+        const { roomId, playerId } = data;
+        const diceVal = Math.floor(Math.random() * 6) + 1;
+        console.log(`[AAA] ${playerId} tiró un ${diceVal} en ${roomId}`);
+        io.to(roomId).emit("event_dice_result", { playerId, diceValue: diceVal });
     });
 
-    socket.on('intent_end_turn', (payload) => {
-        const room = activeRooms[payload.roomId];
-        if (room && room.status === 'PLAYING') {
-            const currentPlayer = room.players[room.currentTurnIndex];
-            if (currentPlayer.playerId === payload.playerId) {
-                let nextPlayerId = payload.hasExtraTurn ? currentPlayer.playerId : getNextTurn(room);
-                if (payload.hasExtraTurn) room.turnState = 'AWAITING_ROLL';
+    socket.on("intent_move_token", (data) => {
+        const { roomId, playerId, tokenId, newPathIndex, isBotMove } = data;
+        console.log(`[AAA] ${playerId} movió ficha ${tokenId} a ${newPathIndex} en ${roomId}`);
+        
+        io.to(roomId).emit("event_token_moved", {
+            playerId,
+            tokenId,
+            newPathIndex
+        });
 
-                io.in(room.id).emit('event_turn_started', { playerId: nextPlayerId });
-
-                // V19.9 - Arrancar Bot Engine si el siguiente está desconectado
-                const nextPlayer = room.players.find(p => p.playerId === nextPlayerId);
-                if (nextPlayer && !nextPlayer.isConnected) {
-                    processServerBotTurn(room.id);
-                }
-            }
-        }
+        // Simulamos que el movimiento tarda 1.5s en pantalla antes de terminar el turno
+        setTimeout(() => {
+            endTurn(roomId, playerId, false); // Simplificado: no evaluamos turnos extra por matar fichas aún
+        }, 1500);
     });
 
-    // ── 3. CICLO DE VIDA (EL SERVIDOR TIENE LA VERDAD) ──────────────────────
-    socket.on('register_identity', (payload) => {
-        socket.data.playerId = payload.playerId;
-        const roomId = playerToRoomMap[payload.playerId];
+    socket.on("intent_end_turn", (data) => {
+        const { roomId, playerId, hasExtraTurn } = data;
+        console.log(`[AAA] ${playerId} finaliza turno en ${roomId}. Extra: ${hasExtraTurn}`);
+        endTurn(roomId, playerId, hasExtraTurn);
+    });
+
+    // ----------------------------------------------------
+    // DESCONEXIÓN Y MOTOR DE IA
+    // ----------------------------------------------------
+    socket.on("disconnect", () => {
+        console.log(`[AAA] Cliente desconectado: ${socket.id}`);
+        const pId = playerIdentities[socket.id];
+        const roomId = playerToRoom[socket.id];
+        
+        // Limpiar colas de matchmaking
+        Object.keys(matchmakingQueues).forEach(key => {
+            matchmakingQueues[key] = matchmakingQueues[key].filter(p => p.socketId !== socket.id);
+        });
+
         if (roomId && activeRooms[roomId]) {
-            socket.join(roomId);
-            const p = activeRooms[roomId].players.find(p => p.playerId === payload.playerId);
+            const room = activeRooms[roomId];
+            const p = room.players.find(x => x.playerId === pId);
             if (p) {
-                p.isConnected = true; p.socketId = socket.id;
-                console.log(`[RECONEXIÓN] Jugador ${payload.playerId} regresó a sala ${roomId}`);
-                io.in(roomId).emit('event_player_reconnected', { playerId: payload.playerId });
-            }
-        }
-    });
-
-    socket.on('disconnect', () => {
-        const playerId = socket.data.playerId;
-        if (playerId) {
-            const mqIdx = matchmakingQueue.findIndex(p => p.playerId === playerId);
-            if (mqIdx !== -1) matchmakingQueue.splice(mqIdx, 1);
-
-            const roomId = playerToRoomMap[playerId];
-            if (roomId && activeRooms[roomId]) {
-                const room = activeRooms[roomId];
-                const p = room.players.find(p => p.playerId === playerId);
-                if (p) {
-                    p.isConnected = false;
-                    console.log(`[CAÍDA] Jugador ${playerId} OFFLINE en sala ${roomId}`);
-                    io.in(roomId).emit('event_player_disconnected', { playerId: playerId });
-
-                    // Si justo le tocaba el turno, el Servidor asume el control Inmediato
-                    if (room.players[room.currentTurnIndex].playerId === playerId) {
-                        processServerBotTurn(roomId);
-                    }
+                p.isConnected = false;
+                io.to(roomId).emit("event_player_disconnected", { playerId: p.playerId });
+                
+                // Si le tocaba a él, el servidor debe tomar el control de su turno ahora
+                const activePlayer = room.players[room.currentTurnIndex];
+                if (activePlayer.playerId === pId) {
+                    processServerBotTurn(roomId, p);
                 }
             }
         }
@@ -205,5 +324,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`[AAA ENGINE] Ludo Authoritative Server V19.9 en puerto ${PORT}`);
+    console.log(`[AAA] Sweety Ludo Servidor Autoritativo V19.9 corriendo en puerto ${PORT}`);
 });
