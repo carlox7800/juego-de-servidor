@@ -7,14 +7,13 @@ app.use(express.json());
 
 const server = http.createServer(app);
 
-// === V20.9: MOTOR AAA AUTORITATIVO ===
+// === V21.0: MOTOR AAA AUTORITATIVO (ESTABILIZADO) ===
 const io = new Server(server, {
     cors: { origin: "*" },
     pingInterval: 4000,
     pingTimeout: 5000
 });
 
-// Base de datos en memoria para salas (Rooms)
 const rooms = {};
 
 function generateUniqueRoomId() {
@@ -25,34 +24,22 @@ function generateUniqueRoomId() {
     return roomId;
 }
 
-// REST API para validación de que el servidor funciona
 app.get('/', (req, res) => {
-    res.send("Sweety Ludo V20.9 Motor AAA Autoritativo is running.");
+    res.send("Sweety Ludo V21.0 Motor AAA Autoritativo is running.");
 });
-
-// =========================================================================
-// WEBSOCKETS (MOTOR DE JUEGO)
-// =========================================================================
 
 io.on('connection', (socket) => {
     console.log(`[WS] Nuevo socket conectado: ${socket.id}`);
 
-    // Identidad del jugador
     socket.on('register_identity', (payload) => {
         socket.playerId = payload.playerId;
         console.log(`[AUTH] Socket ${socket.id} registrado como PlayerID: ${socket.playerId}`);
     });
 
-    // ==========================================
-    // MATCHMAKING Y SALAS
-    // ==========================================
-
     socket.on('join_matchmaking', (payload) => {
         const { playerId, playerName, targetPlayers, mode } = payload;
-        console.log(`[MATCHMAKING] Player ${playerName} (${playerId}) buscando sala de ${targetPlayers} jugadores, modo ${mode}`);
         
         let foundRoomId = null;
-        // Buscar sala pública existente que no esté llena
         for (const [roomId, room] of Object.entries(rooms)) {
             if (!room.isPrivate && room.targetPlayers === targetPlayers && room.players.length < targetPlayers) {
                 foundRoomId = roomId;
@@ -68,24 +55,32 @@ io.on('connection', (socket) => {
                 players: [],
                 targetPlayers: targetPlayers || 2
             };
-            console.log(`[ROOM] Creada nueva sala pública: ${foundRoomId}`);
         }
 
         const room = rooms[foundRoomId];
-        // Evitar duplicados si reenvía el join
         if (!room.players.find(p => p.playerId === playerId)) {
-            room.players.push({ playerId, playerName, socketId: socket.id });
+            room.players.push({ 
+                playerId, 
+                playerName, 
+                socketId: socket.id,
+                isConnected: true
+            });
         }
         
         socket.join(foundRoomId);
         socket.roomId = foundRoomId;
 
-        // Si la sala se llenó, emitir match_found para arrancar el juego
+        // V21.0: Broadcast room_updated to all so UI refreshes
+        io.in(foundRoomId).emit('room_updated', {
+            id: foundRoomId,
+            players: room.players,
+            targetPlayers: room.targetPlayers
+        });
+
         if (room.players.length === room.targetPlayers) {
-            console.log(`[MATCH_FOUND] Sala ${foundRoomId} completada. Iniciando partida.`);
-            
             io.in(foundRoomId).emit('match_found', {
-                roomId: foundRoomId,
+                id: foundRoomId,       // CRITICAL FIX V21.0: Android reads getString("id")
+                roomId: foundRoomId,   // Keep for fallback
                 players: room.players
             });
         }
@@ -97,13 +92,25 @@ io.on('connection', (socket) => {
         rooms[roomId] = {
             id: roomId,
             isPrivate: true,
-            players: [{ playerId, playerName, socketId: socket.id }],
+            players: [{ 
+                playerId, 
+                playerName, 
+                socketId: socket.id,
+                isConnected: true 
+            }],
             targetPlayers: targetPlayers || 2
         };
         socket.join(roomId);
         socket.roomId = roomId;
-        console.log(`[PRIVATE_ROOM] Player ${playerName} creó sala privada: ${roomId}`);
-        socket.emit('private_room_created', { roomCode: roomId });
+        // V21.0: Send id in private_room_created
+        socket.emit('private_room_created', { roomCode: roomId, id: roomId });
+        
+        // V21.0: Explicitly send room_updated so Host sees themselves
+        socket.emit('room_updated', {
+            id: roomId,
+            players: rooms[roomId].players,
+            targetPlayers: rooms[roomId].targetPlayers
+        });
     });
 
     socket.on('join_private_room', (payload) => {
@@ -114,41 +121,43 @@ io.on('connection', (socket) => {
             socket.emit('room_error', { message: "Sala privada no encontrada" });
             return;
         }
-
         if (room.players.length >= room.targetPlayers) {
             socket.emit('room_error', { message: "La sala está llena" });
             return;
         }
 
         if (!room.players.find(p => p.playerId === playerId)) {
-            room.players.push({ playerId, playerName, socketId: socket.id });
+            room.players.push({ 
+                playerId, 
+                playerName, 
+                socketId: socket.id,
+                isConnected: true 
+            });
         }
         socket.join(roomCode);
         socket.roomId = roomCode;
-        console.log(`[PRIVATE_ROOM] Player ${playerName} se unió a sala privada: ${roomCode}`);
+
+        // V21.0: Broadcast room_updated so Host UI refreshes before jumping
+        io.in(roomCode).emit('room_updated', {
+            id: roomCode,
+            players: room.players,
+            targetPlayers: room.targetPlayers
+        });
 
         if (room.players.length === room.targetPlayers) {
-            console.log(`[MATCH_FOUND] Sala privada ${roomCode} completada. Iniciando partida.`);
             io.in(roomCode).emit('match_found', {
+                id: roomCode,         // CRITICAL FIX V21.0: Android reads getString("id")
                 roomId: roomCode,
                 players: room.players
             });
         }
     });
 
-    // ==========================================
-    // LÓGICA DE JUEGO AUTORITATIVO
-    // ==========================================
-
-    // V20.9 - El servidor genera los dados aleatorios y los envía a todos
     socket.on('intent_roll_dice', (payload) => {
         const { roomId, playerId } = payload;
         const d1 = Math.floor(Math.random() * 6) + 1;
         const d2 = Math.floor(Math.random() * 6) + 1;
         
-        console.log(`[GAME] Player ${playerId} (Sala ${roomId}) lanzó dados: ${d1}, ${d2}`);
-        
-        // Broadcast del resultado a todos en la sala, incluido el que tiró
         io.in(roomId).emit('event_dice_result', {
             playerId: playerId,
             diceRoll1: d1,
@@ -159,8 +168,6 @@ io.on('connection', (socket) => {
 
     socket.on('intent_move_token', (payload) => {
         const { roomId, playerId, tokenId, newPathIndex, isBotMove } = payload;
-        console.log(`[GAME] Player ${playerId} (Sala ${roomId}) movió ficha ${tokenId} -> ${newPathIndex}`);
-        
         io.in(roomId).emit('event_token_moved', {
             playerId,
             tokenId,
@@ -171,9 +178,6 @@ io.on('connection', (socket) => {
 
     socket.on('intent_end_turn', (payload) => {
         const { roomId, nextTurnId } = payload;
-        console.log(`[GAME] Sala ${roomId} cambio de turno a: ${nextTurnId}`);
-        
-        // ¡CRUCIAL V20.9! Transmitir a todos que es el turno del otro jugador
         io.in(roomId).emit('event_turn_started', {
             nextTurnId: nextTurnId
         });
@@ -188,25 +192,16 @@ io.on('connection', (socket) => {
         });
     });
 
-    // ==========================================
-    // DESCONEXIONES
-    // ==========================================
-
     socket.on('disconnect', () => {
-        console.log(`[WS] Socket desconectado: ${socket.id} (PlayerID: ${socket.playerId})`);
         if (socket.roomId && socket.playerId) {
             io.in(socket.roomId).emit('event_player_disconnected', {
                 playerId: socket.playerId
             });
-            
-            // Para la Fase de Gracia (9 segundos), no borramos al jugador
-            // de la memoria de forma inmediata. Permitimos que vuelva y se reconecte
-            // emitiendo join_private_room / join_matchmaking nuevamente.
         }
     });
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`[SERVER] Sweety Ludo WebSocket Server V20.9 (Motor AAA) ejecutándose en puerto ${PORT}`);
+    console.log(`[SERVER] Sweety Ludo WebSocket Server V21.0 (Motor AAA Estabilizado) en puerto ${PORT}`);
 });
