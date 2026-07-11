@@ -1,330 +1,212 @@
-const express = require("express");
-const http = require("http");
-const { Server } = require("socket.io");
-const cors = require("cors");
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
 
 const app = express();
-const server = http.createServer(app);
-
-// CORS Config for mobile app
-const io = new Server(server, {
-    cors: {
-        origin: "*", 
-        methods: ["GET", "POST"]
-    }
-});
-
-// Port for Render or Local
-const PORT = process.env.PORT || 3000;
-
-app.use(cors());
 app.use(express.json());
 
-// Express Health Check Route (For Render)
-app.get("/", (req, res) => {
-    res.send("Sweety Ludo Server V20.4 is running. Ready for real-time multiplayer connections.");
+const server = http.createServer(app);
+
+// === V20.9: MOTOR AAA AUTORITATIVO ===
+const io = new Server(server, {
+    cors: { origin: "*" },
+    pingInterval: 4000,
+    pingTimeout: 5000
 });
 
-// ==========================================
-// STATE MANAGEMENT (IN-MEMORY)
-// ==========================================
-// activeRooms contains the game state for each active room
-const activeRooms = {}; 
+// Base de datos en memoria para salas (Rooms)
+const rooms = {};
 
-// matchmakingQueue: { mode: { maxPlayers: [ { socketId, playerId, playerName } ] } }
-const matchmakingQueue = {};
-
-// Maps a socketId to a roomId to handle disconnections efficiently
-const playerToRoom = {};
-
-// -----------------------------------------------------
-// HELPER: Generate 6-Digit Numeric Code (Fix for V20.2/V20.4)
-// -----------------------------------------------------
-function generateNumericRoomCode() {
-    return Math.floor(100000 + Math.random() * 900000).toString(); 
+function generateUniqueRoomId() {
+    let roomId;
+    do {
+        roomId = Math.floor(100000 + Math.random() * 900000).toString();
+    } while (rooms[roomId]);
+    return roomId;
 }
 
-// ==========================================
-// SOCKET.IO EVENT HANDLERS
-// ==========================================
-io.on("connection", (socket) => {
-    console.log(`[+] New connection: ${socket.id}`);
+// REST API para validación de que el servidor funciona
+app.get('/', (req, res) => {
+    res.send("Sweety Ludo V20.9 Motor AAA Autoritativo is running.");
+});
 
-    // =========================================================
-    // 1. MATCHMAKING & ROOM CREATION
-    // =========================================================
+// =========================================================================
+// WEBSOCKETS (MOTOR DE JUEGO)
+// =========================================================================
 
-    // Create a Private Room (Friend Mode)
-    socket.on("create_private_room", (data) => {
-        const { playerId, playerName, mode, maxPlayers } = data;
-        const code = generateNumericRoomCode();
-        
-        activeRooms[code] = {
-            id: code,
-            mode: mode || "FRIEND",
-            maxPlayers: maxPlayers || 4,
-            players: [],
-            currentTurnIndex: 0
-        };
-        
-        const newPlayer = {
-            socketId: socket.id,
-            playerId: playerId || "HOST_ERROR_ID",
-            playerName: playerName || "Jugador",
-            isReady: false,
-            isConnected: true
-        };
-        
-        activeRooms[code].players.push(newPlayer);
-        socket.join(code);
-        playerToRoom[socket.id] = code;
+io.on('connection', (socket) => {
+    console.log(`[WS] Nuevo socket conectado: ${socket.id}`);
 
-        console.log(`[HOST] Room Created: ${code} by ${playerName}`);
-        socket.emit("private_room_created", { roomCode: code });
-        io.to(code).emit("room_updated", activeRooms[code]);
+    // Identidad del jugador
+    socket.on('register_identity', (payload) => {
+        socket.playerId = payload.playerId;
+        console.log(`[AUTH] Socket ${socket.id} registrado como PlayerID: ${socket.playerId}`);
     });
 
-    // Join a Private Room
-    socket.on("join_private_room", (data) => {
-        const { code, playerId, playerName } = data;
-        const room = activeRooms[code];
-        
-        if (room) {
-            if (room.players.length >= room.maxPlayers) {
-                // V20.4 FIX: Send error as object to prevent ClassCastException on client
-                socket.emit("room_error", { message: "La sala está llena." });
-                return;
-            }
+    // ==========================================
+    // MATCHMAKING Y SALAS
+    // ==========================================
 
-            const newPlayer = {
-                socketId: socket.id,
-                playerId: playerId || "GUEST_ERROR_ID",
-                playerName: playerName || "Invitado",
-                isReady: true,
-                isConnected: true
-            };
-            
-            room.players.push(newPlayer);
-            socket.join(code);
-            playerToRoom[socket.id] = code;
-            
-            console.log(`[JOIN] ${playerName} joined ${code}`);
-            
-            io.to(code).emit("room_updated", room);
-            
-            if (room.players.length === room.maxPlayers) {
-                console.log(`[START] Room ${code} is full. Emitting match_found...`);
-                io.to(code).emit("match_found", room); 
-                setTimeout(() => {
-                    startGame(code);
-                }, 3000);
+    socket.on('join_matchmaking', (payload) => {
+        const { playerId, playerName, targetPlayers, mode } = payload;
+        console.log(`[MATCHMAKING] Player ${playerName} (${playerId}) buscando sala de ${targetPlayers} jugadores, modo ${mode}`);
+        
+        let foundRoomId = null;
+        // Buscar sala pública existente que no esté llena
+        for (const [roomId, room] of Object.entries(rooms)) {
+            if (!room.isPrivate && room.targetPlayers === targetPlayers && room.players.length < targetPlayers) {
+                foundRoomId = roomId;
+                break;
             }
-        } else {
-            // V20.4 FIX: Send error as object
-            socket.emit("room_error", { message: "Sala no encontrada o código inválido." });
         }
-    });
 
-    // Join Quick Match (Random Matchmaking)
-    socket.on("join_matchmaking", (data) => {
-        const { playerId, playerName, mode, targetPlayers } = data;
+        if (!foundRoomId) {
+            foundRoomId = generateUniqueRoomId();
+            rooms[foundRoomId] = {
+                id: foundRoomId,
+                isPrivate: false,
+                players: [],
+                targetPlayers: targetPlayers || 2
+            };
+            console.log(`[ROOM] Creada nueva sala pública: ${foundRoomId}`);
+        }
+
+        const room = rooms[foundRoomId];
+        // Evitar duplicados si reenvía el join
+        if (!room.players.find(p => p.playerId === playerId)) {
+            room.players.push({ playerId, playerName, socketId: socket.id });
+        }
         
-        if (!matchmakingQueue[mode]) matchmakingQueue[mode] = {};
-        if (!matchmakingQueue[mode][targetPlayers]) matchmakingQueue[mode][targetPlayers] = [];
-        
-        const queue = matchmakingQueue[mode][targetPlayers];
-        
-        const existing = queue.find(p => p.playerId === playerId);
-        if (!existing) {
-            queue.push({
-                socketId: socket.id,
-                playerId: playerId || "P_ERROR",
-                playerName: playerName || "Jugador",
-                isReady: true,
-                isConnected: true
+        socket.join(foundRoomId);
+        socket.roomId = foundRoomId;
+
+        // Si la sala se llenó, emitir match_found para arrancar el juego
+        if (room.players.length === room.targetPlayers) {
+            console.log(`[MATCH_FOUND] Sala ${foundRoomId} completada. Iniciando partida.`);
+            
+            io.in(foundRoomId).emit('match_found', {
+                roomId: foundRoomId,
+                players: room.players
             });
         }
-        
-        if (queue.length >= targetPlayers) {
-            const matchedGroup = queue.splice(0, targetPlayers);
-            const roomId = generateNumericRoomCode();
-            
-            activeRooms[roomId] = {
-                id: roomId,
-                mode: "CASUAL",
-                maxPlayers: targetPlayers,
-                players: matchedGroup,
-                currentTurnIndex: 0
-            };
-            
-            matchedGroup.forEach(p => {
-                const s = io.sockets.sockets.get(p.socketId);
-                if (s) {
-                    s.join(roomId);
-                    playerToRoom[s.id] = roomId;
-                }
+    });
+
+    socket.on('create_private_room', (payload) => {
+        const { playerId, playerName, targetPlayers } = payload;
+        const roomId = generateUniqueRoomId();
+        rooms[roomId] = {
+            id: roomId,
+            isPrivate: true,
+            players: [{ playerId, playerName, socketId: socket.id }],
+            targetPlayers: targetPlayers || 2
+        };
+        socket.join(roomId);
+        socket.roomId = roomId;
+        console.log(`[PRIVATE_ROOM] Player ${playerName} creó sala privada: ${roomId}`);
+        socket.emit('private_room_created', { roomCode: roomId });
+    });
+
+    socket.on('join_private_room', (payload) => {
+        const { playerId, playerName, roomCode } = payload;
+        const room = rooms[roomCode];
+
+        if (!room || !room.isPrivate) {
+            socket.emit('room_error', { message: "Sala privada no encontrada" });
+            return;
+        }
+
+        if (room.players.length >= room.targetPlayers) {
+            socket.emit('room_error', { message: "La sala está llena" });
+            return;
+        }
+
+        if (!room.players.find(p => p.playerId === playerId)) {
+            room.players.push({ playerId, playerName, socketId: socket.id });
+        }
+        socket.join(roomCode);
+        socket.roomId = roomCode;
+        console.log(`[PRIVATE_ROOM] Player ${playerName} se unió a sala privada: ${roomCode}`);
+
+        if (room.players.length === room.targetPlayers) {
+            console.log(`[MATCH_FOUND] Sala privada ${roomCode} completada. Iniciando partida.`);
+            io.in(roomCode).emit('match_found', {
+                roomId: roomCode,
+                players: room.players
             });
-            
-            io.to(roomId).emit("match_found", activeRooms[roomId]);
-            setTimeout(() => {
-                startGame(roomId);
-            }, 3000);
         }
     });
 
-    // Cancel Matchmaking
-    socket.on("cancel_matchmaking", (data) => {
-        const { playerId, mode, targetPlayers } = data;
-        if (matchmakingQueue[mode] && matchmakingQueue[mode][targetPlayers]) {
-            const q = matchmakingQueue[mode][targetPlayers];
-            const idx = q.findIndex(p => p.playerId === playerId);
-            if (idx !== -1) q.splice(idx, 1);
-        }
-    });
+    // ==========================================
+    // LÓGICA DE JUEGO AUTORITATIVO
+    // ==========================================
 
-    // Check Lobby Exists
-    socket.on("check_lobby", (data) => {
-        const { code } = data;
-        const room = activeRooms[code];
-        if (room) {
-            socket.emit("check_lobby_result", { exists: true });
-        } else {
-            socket.emit("check_lobby_result", { exists: false });
-        }
-    });
-
-    // Set Ready status manually (Host starts the game)
-    socket.on("set_ready", (data) => {
-        const { roomId, playerId, isReady } = data;
-        const room = activeRooms[roomId];
-        if (room) {
-            const p = room.players.find(pl => pl.playerId === playerId);
-            if (p) p.isReady = isReady;
-            io.to(roomId).emit("room_updated", room);
-        }
-    });
-
-    // Intent to start game manually
-    socket.on("intent_start_game", (data) => {
-        const { roomId } = data;
-        const room = activeRooms[roomId];
-        if (room) {
-            room.players.forEach(p => p.isReady = true);
-            io.to(roomId).emit("match_found", room); 
-            setTimeout(() => {
-                startGame(roomId);
-            }, 3000);
-        }
-    });
-
-    // =========================================================
-    // 2. GAMEPLAY MECHANICS (DICE & TOKENS)
-    // =========================================================
-
-    // Roll Dice Intent
-    socket.on("intent_roll_dice", (data) => {
-        const { roomId, playerId } = data;
-        const room = activeRooms[roomId];
-        if (!room) return;
+    // V20.9 - El servidor genera los dados aleatorios y los envía a todos
+    socket.on('intent_roll_dice', (payload) => {
+        const { roomId, playerId } = payload;
+        const d1 = Math.floor(Math.random() * 6) + 1;
+        const d2 = Math.floor(Math.random() * 6) + 1;
         
-        // Random 1 to 6
-        const dice1 = Math.floor(Math.random() * 6) + 1;
-        const dice2 = Math.floor(Math.random() * 6) + 1;
+        console.log(`[GAME] Player ${playerId} (Sala ${roomId}) lanzó dados: ${d1}, ${d2}`);
         
-        io.to(roomId).emit("event_dice_result", {
+        // Broadcast del resultado a todos en la sala, incluido el que tiró
+        io.in(roomId).emit('event_dice_result', {
             playerId: playerId,
-            diceRoll1: dice1,
-            diceRoll2: dice2,
-            isDouble: dice1 === dice2
+            diceRoll1: d1,
+            diceRoll2: d2,
+            diceValues: [d1, d2]
         });
     });
 
-    // Move Token Intent (Token Landing and Safe Zones handled by Android)
-    socket.on("intent_move_token", (data) => {
-        const { roomId, playerId, tokenId, newPathIndex } = data;
-        const room = activeRooms[roomId];
-        if (!room) return;
+    socket.on('intent_move_token', (payload) => {
+        const { roomId, playerId, tokenId, newPathIndex, isBotMove } = payload;
+        console.log(`[GAME] Player ${playerId} (Sala ${roomId}) movió ficha ${tokenId} -> ${newPathIndex}`);
         
-        io.to(roomId).emit("event_token_moved", {
+        io.in(roomId).emit('event_token_moved', {
             playerId,
             tokenId,
-            newPathIndex
+            newPathIndex,
+            isBotMove
         });
     });
 
-    // =========================================================
-    // 3. TURN MANAGEMENT
-    // =========================================================
-    
-    function startGame(roomId) {
-        const room = activeRooms[roomId];
-        if (!room) return;
-        room.currentTurnIndex = 0;
-        const firstPlayer = room.players[0].playerId;
-        io.to(roomId).emit("event_turn_started", {
-            activePlayerId: firstPlayer
-        });
-    }
-
-    socket.on("intent_end_turn", (data) => {
-        const { roomId, nextPlayerId } = data;
-        const room = activeRooms[roomId];
-        if (!room) return;
-
-        // Trust client logic for next player calculation (including double rolls)
-        io.to(roomId).emit("event_turn_started", {
-            activePlayerId: nextPlayerId
+    socket.on('intent_end_turn', (payload) => {
+        const { roomId, nextTurnId } = payload;
+        console.log(`[GAME] Sala ${roomId} cambio de turno a: ${nextTurnId}`);
+        
+        // ¡CRUCIAL V20.9! Transmitir a todos que es el turno del otro jugador
+        io.in(roomId).emit('event_turn_started', {
+            nextTurnId: nextTurnId
         });
     });
 
-    // =========================================================
-    // 4. CHAT MODULE
-    // =========================================================
-    socket.on("intent_chat", (data) => {
-        const { roomId, playerId, message } = data;
-        const room = activeRooms[roomId];
-        if (!room) return;
-
-        const sender = room.players.find(p => p.playerId === playerId);
-        const playerName = sender ? sender.playerName : "Jugador";
-
-        io.to(roomId).emit("event_chat", {
+    socket.on('intent_chat', (payload) => {
+        const { roomId, playerId, playerName, message } = payload;
+        io.in(roomId).emit('event_chat', {
             playerId,
             playerName,
             message
         });
     });
 
-    // =========================================================
-    // 5. DISCONNECTION & CLEANUP
-    // =========================================================
-    socket.on("disconnect", () => {
-        console.log(`[-] Disconnected: ${socket.id}`);
-        const roomId = playerToRoom[socket.id];
-        if (roomId && activeRooms[roomId]) {
-            const room = activeRooms[roomId];
-            const pIndex = room.players.findIndex(p => p.socketId === socket.id);
-            if (pIndex !== -1) {
-                const disconnectedPlayer = room.players[pIndex];
-                disconnectedPlayer.isConnected = false;
-                
-                io.to(roomId).emit("event_player_disconnected", {
-                    playerId: disconnectedPlayer.playerId
-                });
-                
-                const allDisconnected = room.players.every(p => !p.isConnected);
-                if (allDisconnected) {
-                    delete activeRooms[roomId];
-                }
-            }
+    // ==========================================
+    // DESCONEXIONES
+    // ==========================================
+
+    socket.on('disconnect', () => {
+        console.log(`[WS] Socket desconectado: ${socket.id} (PlayerID: ${socket.playerId})`);
+        if (socket.roomId && socket.playerId) {
+            io.in(socket.roomId).emit('event_player_disconnected', {
+                playerId: socket.playerId
+            });
+            
+            // Para la Fase de Gracia (9 segundos), no borramos al jugador
+            // de la memoria de forma inmediata. Permitimos que vuelva y se reconecte
+            // emitiendo join_private_room / join_matchmaking nuevamente.
         }
-        delete playerToRoom[socket.id];
     });
 });
 
+const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`=================================`);
-    console.log(`🚀 Sweety Ludo Server V20.4 Started`);
-    console.log(`📡 Listening on port ${PORT}`);
-    console.log(`=================================`);
+    console.log(`[SERVER] Sweety Ludo WebSocket Server V20.9 (Motor AAA) ejecutándose en puerto ${PORT}`);
 });
