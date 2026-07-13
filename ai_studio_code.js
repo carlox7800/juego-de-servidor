@@ -7,7 +7,7 @@ app.use(express.json());
 
 const server = http.createServer(app);
 
-// === V21.1: MOTOR AAA AUTORITATIVO (UNFREEZE & TRIM) ===
+// === V21.1: MOTOR AAA AUTORITATIVO (UNFREEZE, TRIM & UUID MAPPING) ===
 const io = new Server(server, {
     cors: { origin: "*" },
     pingInterval: 4000,
@@ -193,13 +193,40 @@ io.on('connection', (socket) => {
     });
 
     socket.on('intent_end_turn', (payload) => {
-        // V21.1: Android sends nextPlayerId, we must extract it properly and emit playerId
         const { roomId, nextPlayerId, nextTurnId } = payload;
-        const nextId = String(nextPlayerId || nextTurnId || "");
         
+        // V21.1: Map Android's Color ID (nextPlayerId) to the actual Network UUID.
+        // Android assigns colors deterministically based on connection order (slotIndex):
+        // Slot 0 (Creator) -> "ROJO" -> Color ID 0
+        // Slot 1 (Player 2) -> "AZUL" -> Color ID 3
+        // Slot 2 -> "AMARILLO" -> Color ID 2
+        // Slot 3 -> "VERDE" -> Color ID 1
+        // Slot 4 -> "NARANJA" -> Color ID 4
+        // Slot 5 -> "MORADO" -> Color ID 5
+        const colorIdToSlotIndex = {
+            0: 0,
+            3: 1,
+            2: 2,
+            1: 3,
+            4: 4,
+            5: 5
+        };
+
+        const parsedColorId = parseInt(nextPlayerId !== undefined ? nextPlayerId : nextTurnId, 10);
+        let targetSlot = colorIdToSlotIndex[parsedColorId];
+        
+        if (targetSlot === undefined) targetSlot = 0; // Fallback
+
+        const room = rooms[roomId];
+        let nextNetworkId = String(parsedColorId); // Fallback to raw ID si la sala no existe
+
+        if (room && room.players && room.players[targetSlot]) {
+            nextNetworkId = room.players[targetSlot].playerId;
+        }
+
         io.in(roomId).emit('event_turn_started', {
-            playerId: nextId,
-            activePlayerId: nextId
+            playerId: nextNetworkId,
+            activePlayerId: nextNetworkId
         });
     });
 
@@ -223,5 +250,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`[SERVER] Sweety Ludo WebSocket Server V21.1 (Unfreeze & Trim) en puerto ${PORT}`);
+    console.log(`[SERVER] Sweety Ludo WebSocket Server V21.1 (UUID Mapping) en puerto ${PORT}`);
 });
