@@ -7,7 +7,7 @@ app.use(express.json());
 
 const server = http.createServer(app);
 
-// === V21.0: MOTOR AAA AUTORITATIVO (ESTABILIZADO) ===
+// === V21.1: MOTOR AAA AUTORITATIVO (UNFREEZE & TRIM) ===
 const io = new Server(server, {
     cors: { origin: "*" },
     pingInterval: 4000,
@@ -25,7 +25,7 @@ function generateUniqueRoomId() {
 }
 
 app.get('/', (req, res) => {
-    res.send("Sweety Ludo V21.0 Motor AAA Autoritativo is running.");
+    res.send("Sweety Ludo V21.1 Motor AAA Autoritativo is running.");
 });
 
 io.on('connection', (socket) => {
@@ -70,7 +70,7 @@ io.on('connection', (socket) => {
         socket.join(foundRoomId);
         socket.roomId = foundRoomId;
 
-        // V21.0: Broadcast room_updated to all so UI refreshes
+        // Broadcast room_updated to all so UI refreshes
         io.in(foundRoomId).emit('room_updated', {
             id: foundRoomId,
             players: room.players,
@@ -79,9 +79,16 @@ io.on('connection', (socket) => {
 
         if (room.players.length === room.targetPlayers) {
             io.in(foundRoomId).emit('match_found', {
-                id: foundRoomId,       // CRITICAL FIX V21.0: Android reads getString("id")
-                roomId: foundRoomId,   // Keep for fallback
+                id: foundRoomId,
+                roomId: foundRoomId,
                 players: room.players
+            });
+
+            // V21.1: Emit event_turn_started directly to unfreeze UI
+            const firstPlayer = room.players[0].playerId;
+            io.in(foundRoomId).emit('event_turn_started', {
+                playerId: firstPlayer,
+                activePlayerId: firstPlayer
             });
         }
     });
@@ -102,10 +109,9 @@ io.on('connection', (socket) => {
         };
         socket.join(roomId);
         socket.roomId = roomId;
-        // V21.0: Send id in private_room_created
+        
         socket.emit('private_room_created', { roomCode: roomId, id: roomId });
         
-        // V21.0: Explicitly send room_updated so Host sees themselves
         socket.emit('room_updated', {
             id: roomId,
             players: rooms[roomId].players,
@@ -114,8 +120,12 @@ io.on('connection', (socket) => {
     });
 
     socket.on('join_private_room', (payload) => {
-        const { playerId, playerName, roomCode } = payload;
-        const room = rooms[roomCode];
+        // V21.1: Robust trimming to prevent "Sala privada no encontrada" by keyboard spaces
+        let rawCode = payload.roomCode || payload.code || "";
+        const cleanRoomCode = String(rawCode).trim();
+        const { playerId, playerName } = payload;
+        
+        const room = rooms[cleanRoomCode];
 
         if (!room || !room.isPrivate) {
             socket.emit('room_error', { message: "Sala privada no encontrada" });
@@ -134,21 +144,27 @@ io.on('connection', (socket) => {
                 isConnected: true 
             });
         }
-        socket.join(roomCode);
-        socket.roomId = roomCode;
+        socket.join(cleanRoomCode);
+        socket.roomId = cleanRoomCode;
 
-        // V21.0: Broadcast room_updated so Host UI refreshes before jumping
-        io.in(roomCode).emit('room_updated', {
-            id: roomCode,
+        io.in(cleanRoomCode).emit('room_updated', {
+            id: cleanRoomCode,
             players: room.players,
             targetPlayers: room.targetPlayers
         });
 
         if (room.players.length === room.targetPlayers) {
-            io.in(roomCode).emit('match_found', {
-                id: roomCode,         // CRITICAL FIX V21.0: Android reads getString("id")
-                roomId: roomCode,
+            io.in(cleanRoomCode).emit('match_found', {
+                id: cleanRoomCode,
+                roomId: cleanRoomCode,
                 players: room.players
+            });
+
+            // V21.1: Emit event_turn_started directly to unfreeze UI
+            const firstPlayer = room.players[0].playerId;
+            io.in(cleanRoomCode).emit('event_turn_started', {
+                playerId: firstPlayer,
+                activePlayerId: firstPlayer
             });
         }
     });
@@ -177,9 +193,13 @@ io.on('connection', (socket) => {
     });
 
     socket.on('intent_end_turn', (payload) => {
-        const { roomId, nextTurnId } = payload;
+        // V21.1: Android sends nextPlayerId, we must extract it properly and emit playerId
+        const { roomId, nextPlayerId, nextTurnId } = payload;
+        const nextId = String(nextPlayerId || nextTurnId || "");
+        
         io.in(roomId).emit('event_turn_started', {
-            nextTurnId: nextTurnId
+            playerId: nextId,
+            activePlayerId: nextId
         });
     });
 
@@ -203,5 +223,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`[SERVER] Sweety Ludo WebSocket Server V21.0 (Motor AAA Estabilizado) en puerto ${PORT}`);
+    console.log(`[SERVER] Sweety Ludo WebSocket Server V21.1 (Unfreeze & Trim) en puerto ${PORT}`);
 });
