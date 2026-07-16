@@ -7,7 +7,7 @@ app.use(express.json());
 
 const server = http.createServer(app);
 
-// === V21.5: MOTOR AAA AUTORITATIVO CON TIEMPO DE GRACIA Y BOT TAKEOVER ===
+// === V21.6: MOTOR AAA AUTORITATIVO CON TIEMPO DE GRACIA Y BOT TAKEOVER ===
 const io = new Server(server, {
     cors: { origin: "*" },
     pingInterval: 4000,
@@ -25,7 +25,7 @@ function generateUniqueRoomId() {
 }
 
 app.get('/', (req, res) => {
-    res.send("Sweety Ludo V21.5 Motor AAA Autoritativo is running.");
+    res.send("Sweety Ludo V21.6 Motor AAA Autoritativo is running.");
 });
 
 io.on('connection', (socket) => {
@@ -183,7 +183,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    // ── Unirse / Reconectarse a una sala (V21.5 Reconnection handler) ──
+    // ── Unirse / Reconectarse a una sala (V21.6 Reconnection handler) ──
     socket.on('join_room', (payload) => {
         const roomId = typeof payload === 'string' ? payload : payload.roomId;
         const playerId = typeof payload === 'string' ? null : payload.playerId;
@@ -196,6 +196,7 @@ io.on('connection', (socket) => {
         if (room && room.players) {
             const player = room.players.find(p => p.playerId === playerId);
             if (player) {
+                const wasOffline = !player.isConnected || player.isBot;
                 player.socketId = socket.id;
                 player.isConnected = true;
                 player.isBot = false;
@@ -208,9 +209,12 @@ io.on('connection', (socket) => {
                     targetPlayers: room.targetPlayers
                 });
                 
-                io.in(roomId).emit('event_player_reconnected', {
-                    playerId: playerId
-                });
+                // Evitamos alertar de reconexión si el juego no ha comenzado (en lobby)
+                if (wasOffline && room.gameStarted) {
+                    io.in(roomId).emit('event_player_reconnected', {
+                        playerId: playerId
+                    });
+                }
             }
         }
     });
@@ -242,13 +246,6 @@ io.on('connection', (socket) => {
         const { roomId, nextPlayerId, nextTurnId } = payload;
         
         // V21.1: Map Android's Color ID (nextPlayerId) to the actual Network UUID.
-        // Android assigns colors deterministically based on connection order (slotIndex):
-        // Slot 0 (Creator) -> "ROJO" -> Color ID 0
-        // Slot 1 (Player 2) -> "AZUL" -> Color ID 3
-        // Slot 2 -> "AMARILLO" -> Color ID 2
-        // Slot 3 -> "VERDE" -> Color ID 1
-        // Slot 4 -> "NARANJA" -> Color ID 4
-        // Slot 5 -> "MORADO" -> Color ID 5
         const colorIdToSlotIndex = {
             0: 0,
             3: 1,
@@ -270,16 +267,16 @@ io.on('connection', (socket) => {
             nextNetworkId = room.players[targetSlot].playerId;
         }
 
-        // V21.5 Autoritativo:
+        // V21.6 Autoritativo:
         // Decrementar gracia al jugador que acaba de terminar su turno
         if (room && room.players && room.currentTurnSlot !== undefined) {
             const prevPlayer = room.players[room.currentTurnSlot];
             if (prevPlayer && prevPlayer.isConnected === false && prevPlayer._graceTurnsLeft !== undefined) {
                 prevPlayer._graceTurnsLeft -= 1;
-                console.log(`[GRACIA V21.5] Jugador ${prevPlayer.playerId} consumió 1 turno bot. Restantes: ${prevPlayer._graceTurnsLeft}`);
+                console.log(`[GRACIA] Jugador ${prevPlayer.playerId} consumió 1 turno bot. Restantes: ${prevPlayer._graceTurnsLeft}`);
                 
                 if (prevPlayer._graceTurnsLeft <= 0) {
-                    console.log(`[VERDUGO V21.5] Jugador ${prevPlayer.playerId} agotó su gracia. EXPULSADO.`);
+                    console.log(`[VERDUGO] Jugador ${prevPlayer.playerId} agotó su gracia. EXPULSADO.`);
                     
                     // Emitir evento mandatorio de expulsión
                     io.in(roomId).emit('event_player_expelled', { playerId: prevPlayer.playerId });
@@ -288,10 +285,9 @@ io.on('connection', (socket) => {
                     prevPlayer.isExpelled = true;
                     prevPlayer.isBot = false;
                     
-                    // ¿Cuántos humanos quedan activos en la sala?
+                    // Contamos los jugadores humanos restantes activos
                     const activeHumans = room.players.filter(p => !p.isBot && p.isConnected && !p.isExpelled);
                     if (activeHumans.length <= 1) {
-                        // El juego termina por abandono. El ganador es el humano restante.
                         const winner = activeHumans[0];
                         io.in(roomId).emit('event_game_over_by_abandonment', {
                             winnerId: winner ? winner.playerId : ""
@@ -336,7 +332,7 @@ io.on('connection', (socket) => {
                     if (room.gameStarted) {
                         player.isBot = true;
                         player._graceTurnsLeft = 2;
-                        console.log(`[GRACIA V21.5] Jugador ${playerId} desconectado. Asignando Bot y 2 turnos de gracia.`);
+                        console.log(`[GRACIA] Jugador ${playerId} desconectado. Asignando Bot y 2 turnos de gracia.`);
                     }
                     
                     io.in(roomId).emit('room_updated', {
@@ -363,5 +359,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`[SERVER] Sweety Ludo WebSocket Server V21.5 (Autoritativo Gracia) en puerto ${PORT}`);
+    console.log(`[SERVER] Sweety Ludo WebSocket Server V21.6 (Autoritativo Gracia) en puerto ${PORT}`);
 });
