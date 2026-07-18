@@ -7,7 +7,7 @@ app.use(express.json());
 
 const server = http.createServer(app);
 
-// === V21.6: MOTOR AAA AUTORITATIVO CON TIEMPO DE GRACIA Y BOT TAKEOVER ===
+// === V21.7: MOTOR AAA AUTORITATIVO (RESYNC & BOT TAKEOVER) ===
 const io = new Server(server, {
     cors: { origin: "*" },
     pingInterval: 4000,
@@ -25,7 +25,7 @@ function generateUniqueRoomId() {
 }
 
 app.get('/', (req, res) => {
-    res.send("Sweety Ludo V21.6 Motor AAA Autoritativo is running.");
+    res.send("Sweety Ludo V21.7 Motor AAA Autoritativo is running.");
 });
 
 io.on('connection', (socket) => {
@@ -73,7 +73,6 @@ io.on('connection', (socket) => {
         socket.roomId = foundRoomId;
         socket.playerId = playerId;
 
-        // Broadcast room_updated to all so UI refreshes
         io.in(foundRoomId).emit('room_updated', {
             id: foundRoomId,
             players: room.players,
@@ -82,7 +81,7 @@ io.on('connection', (socket) => {
 
         if (room.players.length === room.targetPlayers) {
             room.gameStarted = true;
-            room.currentTurnSlot = 0; // Initialize turn slot
+            room.currentTurnSlot = 0; 
             
             io.in(foundRoomId).emit('match_found', {
                 id: foundRoomId,
@@ -90,7 +89,6 @@ io.on('connection', (socket) => {
                 players: room.players
             });
 
-            // V21.1: Emit event_turn_started directly to unfreeze UI
             const firstPlayer = room.players[0].playerId;
             io.in(foundRoomId).emit('event_turn_started', {
                 playerId: firstPlayer,
@@ -129,7 +127,6 @@ io.on('connection', (socket) => {
     });
 
     socket.on('join_private_room', (payload) => {
-        // V21.1: Robust trimming to prevent "Sala privada no encontrada" by keyboard spaces
         let rawCode = payload.roomCode || payload.code || "";
         const cleanRoomCode = String(rawCode).trim();
         const { playerId, playerName } = payload;
@@ -166,7 +163,7 @@ io.on('connection', (socket) => {
 
         if (room.players.length === room.targetPlayers) {
             room.gameStarted = true;
-            room.currentTurnSlot = 0; // Initialize turn slot
+            room.currentTurnSlot = 0; 
             
             io.in(cleanRoomCode).emit('match_found', {
                 id: cleanRoomCode,
@@ -174,7 +171,6 @@ io.on('connection', (socket) => {
                 players: room.players
             });
 
-            // V21.1: Emit event_turn_started directly to unfreeze UI
             const firstPlayer = room.players[0].playerId;
             io.in(cleanRoomCode).emit('event_turn_started', {
                 playerId: firstPlayer,
@@ -183,7 +179,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    // ── Unirse / Reconectarse a una sala (V21.6 Reconnection handler) ──
+    // ── RECONEXIÓN V21.7 ──
     socket.on('join_room', (payload) => {
         const roomId = typeof payload === 'string' ? payload : payload.roomId;
         const playerId = typeof payload === 'string' ? null : payload.playerId;
@@ -201,7 +197,7 @@ io.on('connection', (socket) => {
                 player.isConnected = true;
                 player.isBot = false;
                 delete player._graceTurnsLeft;
-                console.log(`[RECONEXIÓN] Jugador ${playerId} volvió a sala ${roomId} (socket: ${socket.id})`);
+                console.log(`[RECONEXIÓN] Jugador ${playerId} volvió a sala ${roomId}`);
                 
                 io.in(roomId).emit('room_updated', {
                     id: roomId,
@@ -209,8 +205,8 @@ io.on('connection', (socket) => {
                     targetPlayers: room.targetPlayers
                 });
                 
-                // Evitamos alertar de reconexión si el juego no ha comenzado (en lobby)
                 if (wasOffline && room.gameStarted) {
+                    // Informar que volvió, esto disparará host_sync_state en el cliente Host Suplente
                     io.in(roomId).emit('event_player_reconnected', {
                         playerId: playerId
                     });
@@ -245,47 +241,34 @@ io.on('connection', (socket) => {
     socket.on('intent_end_turn', (payload) => {
         const { roomId, nextPlayerId, nextTurnId } = payload;
         
-        // V21.1: Map Android's Color ID (nextPlayerId) to the actual Network UUID.
         const colorIdToSlotIndex = {
-            0: 0,
-            3: 1,
-            2: 2,
-            1: 3,
-            4: 4,
-            5: 5
+            0: 0, 3: 1, 2: 2, 1: 3, 4: 4, 5: 5
         };
 
         const parsedColorId = parseInt(nextPlayerId !== undefined ? nextPlayerId : nextTurnId, 10);
         let targetSlot = colorIdToSlotIndex[parsedColorId];
         
-        if (targetSlot === undefined) targetSlot = 0; // Fallback
+        if (targetSlot === undefined) targetSlot = 0;
 
         const room = rooms[roomId];
-        let nextNetworkId = String(parsedColorId); // Fallback to raw ID si la sala no existe
+        let nextNetworkId = String(parsedColorId); 
 
         if (room && room.players && room.players[targetSlot]) {
             nextNetworkId = room.players[targetSlot].playerId;
         }
 
-        // V21.6 Autoritativo:
-        // Decrementar gracia al jugador que acaba de terminar su turno
         if (room && room.players && room.currentTurnSlot !== undefined) {
             const prevPlayer = room.players[room.currentTurnSlot];
             if (prevPlayer && prevPlayer.isConnected === false && prevPlayer._graceTurnsLeft !== undefined) {
                 prevPlayer._graceTurnsLeft -= 1;
-                console.log(`[GRACIA] Jugador ${prevPlayer.playerId} consumió 1 turno bot. Restantes: ${prevPlayer._graceTurnsLeft}`);
+                console.log(`[GRACIA V21.7] Jugador ${prevPlayer.playerId} consumió 1 turno bot. Restantes: ${prevPlayer._graceTurnsLeft}`);
                 
                 if (prevPlayer._graceTurnsLeft <= 0) {
-                    console.log(`[VERDUGO] Jugador ${prevPlayer.playerId} agotó su gracia. EXPULSADO.`);
-                    
-                    // Emitir evento mandatorio de expulsión
+                    console.log(`[VERDUGO V21.7] Jugador ${prevPlayer.playerId} agotó su gracia. EXPULSADO.`);
                     io.in(roomId).emit('event_player_expelled', { playerId: prevPlayer.playerId });
-                    
-                    // Marcar al jugador como expulsado
                     prevPlayer.isExpelled = true;
                     prevPlayer.isBot = false;
                     
-                    // Contamos los jugadores humanos restantes activos
                     const activeHumans = room.players.filter(p => !p.isBot && p.isConnected && !p.isExpelled);
                     if (activeHumans.length <= 1) {
                         const winner = activeHumans[0];
@@ -297,7 +280,6 @@ io.on('connection', (socket) => {
             }
         }
 
-        // Actualizar el turno actual en la sala
         if (room) {
             room.currentTurnSlot = targetSlot;
         }
@@ -317,6 +299,20 @@ io.on('connection', (socket) => {
         });
     });
 
+    // ── V21.7 REPARTO DEL ESTADO DEL JUEGO ──
+    socket.on('host_sync_state', (payload) => {
+        const { roomId, targetPlayerId, gameState } = payload;
+        const room = rooms[roomId];
+        if (room && room.players) {
+            const targetPlayer = room.players.find(p => p.playerId === targetPlayerId);
+            if (targetPlayer && targetPlayer.socketId) {
+                // Enviar estado de reconexión únicamente al socket del jugador que volvió
+                io.to(targetPlayer.socketId).emit('event_state_resynced', gameState);
+                console.log(`[SYNC] Estado reenviado del Host Suplente al jugador reconectado: ${targetPlayerId}`);
+            }
+        }
+    });
+
     socket.on('disconnect', () => {
         console.log(`[WS] Socket desconectado: ${socket.id}`);
         if (socket.roomId && socket.playerId) {
@@ -331,8 +327,8 @@ io.on('connection', (socket) => {
                     
                     if (room.gameStarted) {
                         player.isBot = true;
-                        player._graceTurnsLeft = 2;
-                        console.log(`[GRACIA] Jugador ${playerId} desconectado. Asignando Bot y 2 turnos de gracia.`);
+                        player._graceTurnsLeft = 2; // Otorga 2 turnos de gracia antes de expulsión
+                        console.log(`[GRACIA] Jugador ${playerId} desconectado. Asignando Bot Suplente y 2 turnos de gracia.`);
                     }
                     
                     io.in(roomId).emit('room_updated', {
@@ -345,11 +341,10 @@ io.on('connection', (socket) => {
                         playerId: playerId
                     });
 
-                    // Si todos los jugadores se desconectaron, destruimos la sala
                     const allDisconnected = room.players.every(p => p.isConnected === false);
                     if (allDisconnected) {
                         delete rooms[roomId];
-                        console.log(`[LIMPIEZA] Sala ${roomId} eliminada. Todos los jugadores están offline.`);
+                        console.log(`[LIMPIEZA] Sala ${roomId} eliminada por inactividad total.`);
                     }
                 }
             }
@@ -359,5 +354,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`[SERVER] Sweety Ludo WebSocket Server V21.6 (Autoritativo Gracia) en puerto ${PORT}`);
+    console.log(`[SERVER] Sweety Ludo WebSocket Server V21.7 (Acting Host & Sync) corriendo en puerto ${PORT}`);
 });
