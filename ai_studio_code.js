@@ -1,4 +1,4 @@
-// === Sweety Ludo Server V21.9 — Bot Loop Fix & Grace Turns ===
+// === Sweety Ludo Server V22.10 - Turn Cycle & Legacy Sync Fix ===
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -142,7 +142,7 @@ io.on('connection', (socket) => {
             return;
         }
         if (room.players.length >= room.targetPlayers) {
-            socket.emit('room_error', { message: "La sala está llena" });
+            socket.emit('room_error', { message: "La sala estǭ llena" });
             return;
         }
 
@@ -184,7 +184,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    // ── Unirse / Reconectarse a una sala (V21.5 Reconnection handler) ──
+    // Unirse / Reconectarse a una sala (V21.5 Reconnection handler)
     socket.on('join_room', (payload) => {
         const roomId = typeof payload === 'string' ? payload : payload.roomId;
         const playerId = typeof payload === 'string' ? null : payload.playerId;
@@ -202,7 +202,7 @@ io.on('connection', (socket) => {
                 player.isConnected = true;
                 player.isBot = false;
                 delete player._graceTurnsLeft;
-                console.log(`[RECONEXIÓN] Jugador ${playerId} volvió a sala ${roomId} (socket: ${socket.id})`);
+                console.log(`[RECONEXI"N] Jugador ${playerId} volvi a sala ${roomId} (socket: ${socket.id})`);
                 
                 io.in(roomId).emit('room_updated', {
                     id: roomId,
@@ -245,19 +245,19 @@ io.on('connection', (socket) => {
     socket.on('intent_end_turn', (payload) => {
         const { roomId, nextPlayerId, nextTurnId } = payload;
         
-        // V21.1: Map Android's Color ID (nextPlayerId) to the actual Network UUID.
+        // V22.10: Map Android's Color ID (nextPlayerId) to the actual Network UUID.
         // Android assigns colors deterministically based on connection order (slotIndex):
-        // Slot 0 (Creator) -> "ROJO" -> Color ID 0
-        // Slot 1 (Player 2) -> "AZUL" -> Color ID 3
-        // Slot 2 -> "AMARILLO" -> Color ID 2
-        // Slot 3 -> "VERDE" -> Color ID 1
-        // Slot 4 -> "NARANJA" -> Color ID 4
-        // Slot 5 -> "MORADO" -> Color ID 5
+        // Slot 0 (Creator) -> "ROJO"     -> Color ID 0
+        // Slot 1 (Player 2) -> "AZUL"    -> Color ID 2
+        // Slot 2           -> "AMARILLO" -> Color ID 1
+        // Slot 3           -> "VERDE"    -> Color ID 3
+        // Slot 4           -> "NARANJA"  -> Color ID 4
+        // Slot 5           -> "MORADO"   -> Color ID 5
         const colorIdToSlotIndex = {
             0: 0,
-            3: 1,
-            2: 2,
-            1: 3,
+            2: 1, // AZUL ahora es el ID 2
+            1: 2, // AMARILLO ahora es el ID 1
+            3: 3, // VERDE ahora es el ID 3
             4: 4,
             5: 5
         };
@@ -280,19 +280,19 @@ io.on('connection', (socket) => {
             const prevPlayer = room.players[room.currentTurnSlot];
             if (prevPlayer && prevPlayer.isConnected === false && prevPlayer._graceTurnsLeft !== undefined) {
                 prevPlayer._graceTurnsLeft -= 1;
-                console.log(`[GRACIA V21.5] Jugador ${prevPlayer.playerId} consumió 1 turno bot. Restantes: ${prevPlayer._graceTurnsLeft}`);
+                console.log(`[GRACIA V21.5] Jugador ${prevPlayer.playerId} consumi 1 turno bot. Restantes: ${prevPlayer._graceTurnsLeft}`);
                 
                 if (prevPlayer._graceTurnsLeft <= 0) {
-                    console.log(`[VERDUGO V21.5] Jugador ${prevPlayer.playerId} agotó su gracia. EXPULSADO.`);
+                    console.log(`[VERDUGO V21.5] Jugador ${prevPlayer.playerId} agot su gracia. EXPULSADO.`);
                     
-                    // Emitir evento mandatorio de expulsión
+                    // Emitir evento mandatorio de expulsin
                     io.in(roomId).emit('event_player_expelled', { playerId: prevPlayer.playerId });
                     
                     // Marcar al jugador como expulsado
                     prevPlayer.isExpelled = true;
                     prevPlayer.isBot = false;
                     
-                    // ¿Cuántos humanos quedan activos en la sala?
+                    // Cuǭntos humanos quedan activos en la sala?
                     const activeHumans = room.players.filter(p => !p.isBot && p.isConnected && !p.isExpelled);
                     if (activeHumans.length <= 1) {
                         // El juego termina por abandono. El ganador es el humano restante.
@@ -352,11 +352,11 @@ io.on('connection', (socket) => {
                     if (room.gameStarted) {
                         player.isBot = true;
                         // V21.9: Grace turns depend on room size:
-                        // 2-player duel → 5 grace turns (give more time for reconnect)
-                        // 4+ players    → 2 grace turns (keep game flowing fast)
+                        // 2-player duel ' 5 grace turns (give more time for reconnect)
+                        // 4+ players    ' 2 grace turns (keep game flowing fast)
                         const graceTurns = room.targetPlayers === 2 ? 5 : 2;
                         player._graceTurnsLeft = graceTurns;
-                        console.log(`[GRACIA V21.9] Jugador ${playerId} desconectado. Sala ${room.targetPlayers}p → Bot con ${graceTurns} turnos de gracia.`);
+                        console.log(`[GRACIA V21.9] Jugador ${playerId} desconectado. Sala ${room.targetPlayers}p ' Bot con ${graceTurns} turnos de gracia.`);
                     }
                     
                     io.in(roomId).emit('room_updated', {
@@ -373,7 +373,7 @@ io.on('connection', (socket) => {
                     const allDisconnected = room.players.every(p => p.isConnected === false);
                     if (allDisconnected) {
                         delete rooms[roomId];
-                        console.log(`[LIMPIEZA] Sala ${roomId} eliminada. Todos los jugadores están offline.`);
+                        console.log(`[LIMPIEZA] Sala ${roomId} eliminada. Todos los jugadores estǭn offline.`);
                     }
                 }
             }
@@ -383,5 +383,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`[SERVER] Sweety Ludo WebSocket Server V21.9 (Bot Loop Fix & Grace Turns) en puerto ${PORT}`);
+    console.log(`[SERVER] Sweety Ludo WebSocket Server V22.10 (Turn Cycle & Legacy Sync Fix) en puerto ${PORT}`);
 });
