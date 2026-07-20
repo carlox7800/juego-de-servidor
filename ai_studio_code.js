@@ -1,4 +1,4 @@
-// === Sweety Ludo Server V23.2 – Late Reconnection V2 & Anti-Ghost ===
+// === Sweety Ludo Server V23.0 Base + Private Room Sync Fix ===
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -138,10 +138,12 @@ io.on('connection', (socket) => {
         const room = rooms[cleanRoomCode];
 
         if (!room || !room.isPrivate) {
+            // V23.0 Late Reconnection Guardian: Redirigir al podio si la sala ya fue eliminada (host abandonó o ganó)
+            socket.emit('event_room_expired', { roomId: cleanRoomCode, reason: "Sala ya no existe" });
             socket.emit('room_error', { message: "Sala privada no encontrada" });
             return;
         }
-        let needsResync = false;
+
         const existingPlayer = room.players.find(p => p.playerId === playerId);
         if (!existingPlayer) {
             if (room.players.length >= room.targetPlayers) {
@@ -156,14 +158,20 @@ io.on('connection', (socket) => {
                 isBot: false
             });
         } else {
-            // Evaluamos si requiere resincronización (corte real y NO está expulsado)
-            needsResync = (existingPlayer.socketId !== socket.id || !existingPlayer.isConnected || existingPlayer.isBot) && !existingPlayer.isExpelled;
-            
+            // V23.0 Base Fix para Modo Competitivo: Manejar la reconexión igual que en join_room
+            const wasOffline = !existingPlayer.isConnected || existingPlayer.isBot;
             existingPlayer.socketId = socket.id;
             existingPlayer.isConnected = true;
             existingPlayer.isBot = false;
             delete existingPlayer._graceTurnsLeft;
             console.log(`[RECONEXIÓN] Jugador ${playerId} volvió a sala privada ${cleanRoomCode} vía JOIN_PRIVATE`);
+            
+            // Emitir la orden de resincronización al Host SÓLO si el jugador realmente estaba desconectado
+            if (wasOffline && room.gameStarted) {
+                io.in(cleanRoomCode).emit('event_player_reconnected', {
+                    playerId: playerId
+                });
+            }
         }
         
         socket.join(cleanRoomCode);
@@ -186,15 +194,12 @@ io.on('connection', (socket) => {
                 players: room.players
             });
             setTimeout(() => {
+                const firstPlayer = room.players[0].playerId;
                 io.in(cleanRoomCode).emit('event_turn_started', {
-                    playerId: room.players[0].playerId,
-                    colorId: 0
+                    playerId: firstPlayer,
+                    activePlayerId: firstPlayer
                 });
             }, 3500);
-        } else if (room.gameStarted && needsResync) {
-            io.in(cleanRoomCode).emit('event_player_reconnected', {
-                playerId: playerId
-            });
         }
     });
 
@@ -211,9 +216,7 @@ io.on('connection', (socket) => {
         if (room && room.players) {
             const player = room.players.find(p => p.playerId === playerId);
             if (player) {
-                // Evaluamos si requiere resincronización (corte real y NO está expulsado)
-                const needsResync = (player.socketId !== socket.id || !player.isConnected || player.isBot) && !player.isExpelled;
-                
+                const wasOffline = !player.isConnected || player.isBot;
                 player.socketId = socket.id;
                 player.isConnected = true;
                 player.isBot = false;
@@ -226,12 +229,15 @@ io.on('connection', (socket) => {
                     targetPlayers: room.targetPlayers
                 });
                 
-                if (room.gameStarted && needsResync) {
+                if (wasOffline && room.gameStarted) {
                     io.in(roomId).emit('event_player_reconnected', {
                         playerId: playerId
                     });
                 }
             }
+        } else {
+            // V23.0 Late Reconnection Guardian
+            socket.emit('event_room_expired', { roomId: roomId, reason: "Sala ya no existe" });
         }
     });
 
@@ -400,5 +406,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`[SERVER] Sweety Ludo WebSocket Server V23.2 (Late Reconnection V2 & Anti-Ghost) en puerto ${PORT}`);
+    console.log(`[SERVER] Sweety Ludo WebSocket Server V23.0 Base + Private Room Sync Fix en puerto ${PORT}`);
 });
