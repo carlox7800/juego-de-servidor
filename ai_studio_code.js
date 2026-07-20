@@ -1,4 +1,4 @@
-// === Sweety Ludo Server V23.1 – Comp Sync Fix ===
+// === Sweety Ludo Server V23.2 – Late Reconnection V2 & Anti-Ghost ===
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -141,6 +141,7 @@ io.on('connection', (socket) => {
             socket.emit('room_error', { message: "Sala privada no encontrada" });
             return;
         }
+        let needsResync = false;
         const existingPlayer = room.players.find(p => p.playerId === playerId);
         if (!existingPlayer) {
             if (room.players.length >= room.targetPlayers) {
@@ -155,6 +156,9 @@ io.on('connection', (socket) => {
                 isBot: false
             });
         } else {
+            // Evaluamos si requiere resincronización (corte real y NO está expulsado)
+            needsResync = (existingPlayer.socketId !== socket.id || !existingPlayer.isConnected || existingPlayer.isBot) && !existingPlayer.isExpelled;
+            
             existingPlayer.socketId = socket.id;
             existingPlayer.isConnected = true;
             existingPlayer.isBot = false;
@@ -187,7 +191,7 @@ io.on('connection', (socket) => {
                     colorId: 0
                 });
             }, 3500);
-        } else if (room.gameStarted) {
+        } else if (room.gameStarted && needsResync) {
             io.in(cleanRoomCode).emit('event_player_reconnected', {
                 playerId: playerId
             });
@@ -207,6 +211,9 @@ io.on('connection', (socket) => {
         if (room && room.players) {
             const player = room.players.find(p => p.playerId === playerId);
             if (player) {
+                // Evaluamos si requiere resincronización (corte real y NO está expulsado)
+                const needsResync = (player.socketId !== socket.id || !player.isConnected || player.isBot) && !player.isExpelled;
+                
                 player.socketId = socket.id;
                 player.isConnected = true;
                 player.isBot = false;
@@ -219,7 +226,7 @@ io.on('connection', (socket) => {
                     targetPlayers: room.targetPlayers
                 });
                 
-                if (room.gameStarted) {
+                if (room.gameStarted && needsResync) {
                     io.in(roomId).emit('event_player_reconnected', {
                         playerId: playerId
                     });
@@ -255,6 +262,13 @@ io.on('connection', (socket) => {
         const { roomId, nextPlayerId, nextTurnId } = payload;
         
         // V23.0: Map Android's Color ID (nextPlayerId) to the actual Network UUID.
+        // Android assigns colors deterministically based on connection order (slotIndex):
+        // Slot 0 (Creator) -> "ROJO" -> Color ID 0
+        // Slot 1 (Player 2) -> "AZUL" -> Color ID 2
+        // Slot 2 -> "AMARILLO" -> Color ID 1
+        // Slot 3 -> "VERDE" -> Color ID 3
+        // Slot 4 -> "NARANJA" -> Color ID 4
+        // Slot 5 -> "MORADO" -> Color ID 5
         const colorIdToSlotIndex = {
             0: 0,
             2: 1,
@@ -386,5 +400,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`[SERVER] Sweety Ludo WebSocket Server V23.1 (Comp Sync Fix) en puerto ${PORT}`);
+    console.log(`[SERVER] Sweety Ludo WebSocket Server V23.2 (Late Reconnection V2 & Anti-Ghost) en puerto ${PORT}`);
 });
