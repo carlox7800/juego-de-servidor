@@ -1,4 +1,4 @@
-// === Sweety Ludo Server V22.10 - Turn Cycle & Legacy Sync Fix ===
+// === Sweety Ludo Server V23.0 - Motor AAA (Late Reconnection & Podio Redirect) ===
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -189,11 +189,32 @@ io.on('connection', (socket) => {
         const roomId = typeof payload === 'string' ? payload : payload.roomId;
         const playerId = typeof payload === 'string' ? null : payload.playerId;
 
+        const room = rooms[roomId];
+        
+        // === NUEVO V23.0: Sala inexistente = partida ya terminó ===
+        if (!room) {
+            socket.emit('event_room_expired', {
+                reason: 'ROOM_NOT_FOUND',
+                message: 'La partida ya terminó mientras estabas desconectado.'
+            });
+            return;
+        }
+
+        // === NUEVO V23.0: Sala existe pero el juego ya terminó por expulsión ===
+        const player = room.players.find(p => p.playerId === playerId);
+        if (player && player.isExpelled) {
+            socket.emit('event_room_expired', {
+                reason: 'PLAYER_WAS_EXPELLED',
+                winnerId: room.lastWinnerId || '',
+                message: 'Fuiste expulsado por desconexión prolongada.'
+            });
+            return;
+        }
+
         socket.join(roomId);
         socket.roomId = roomId;
         socket.playerId = playerId;
 
-        const room = rooms[roomId];
         if (room && room.players) {
             const player = room.players.find(p => p.playerId === playerId);
             if (player) {
@@ -245,19 +266,19 @@ io.on('connection', (socket) => {
     socket.on('intent_end_turn', (payload) => {
         const { roomId, nextPlayerId, nextTurnId } = payload;
         
-        // V22.10: Map Android's Color ID (nextPlayerId) to the actual Network UUID.
+        // V23.0: Map Android's Color ID (nextPlayerId) to the actual Network UUID.
         // Android assigns colors deterministically based on connection order (slotIndex):
-        // Slot 0 (Creator) -> "ROJO"     -> Color ID 0
-        // Slot 1 (Player 2) -> "AZUL"    -> Color ID 2
-        // Slot 2           -> "AMARILLO" -> Color ID 1
-        // Slot 3           -> "VERDE"    -> Color ID 3
-        // Slot 4           -> "NARANJA"  -> Color ID 4
-        // Slot 5           -> "MORADO"   -> Color ID 5
+        // Slot 0 (Creator) -> "ROJO" -> Color ID 0
+        // Slot 1 (Player 2) -> "AZUL" -> Color ID 2
+        // Slot 2 -> "AMARILLO" -> Color ID 1
+        // Slot 3 -> "VERDE" -> Color ID 3
+        // Slot 4 -> "NARANJA" -> Color ID 4
+        // Slot 5 -> "MORADO" -> Color ID 5
         const colorIdToSlotIndex = {
             0: 0,
-            2: 1, // AZUL ahora es el ID 2
-            1: 2, // AMARILLO ahora es el ID 1
-            3: 3, // VERDE ahora es el ID 3
+            2: 1,
+            1: 2,
+            3: 3,
             4: 4,
             5: 5
         };
@@ -297,6 +318,7 @@ io.on('connection', (socket) => {
                     if (activeHumans.length <= 1) {
                         // El juego termina por abandono. El ganador es el humano restante.
                         const winner = activeHumans[0];
+                        room.lastWinnerId = winner ? winner.playerId : '';
                         io.in(roomId).emit('event_game_over_by_abandonment', {
                             winnerId: winner ? winner.playerId : ""
                         });
@@ -383,5 +405,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`[SERVER] Sweety Ludo WebSocket Server V22.10 (Turn Cycle & Legacy Sync Fix) en puerto ${PORT}`);
+    console.log(`[SERVER] Sweety Ludo WebSocket Server V23.0 (Late Reconnection & Podio Redirect) en puerto ${PORT}`);
 });
