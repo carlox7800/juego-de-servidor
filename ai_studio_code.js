@@ -1,185 +1,129 @@
-// === Sweety Ludo Server V23.0 Base + Private Room Sync Fix ===
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 
 const app = express();
-app.use(express.json());
-
 const server = http.createServer(app);
 
-// === V21.5: MOTOR AAA AUTORITATIVO CON TIEMPO DE GRACIA Y BOT TAKEOVER ===
+// ---------------------------------------------------
+// CONFIGURACIÓN CORS ACTUALIZADA (V20 - MOTOR AAA)
+// ---------------------------------------------------
 const io = new Server(server, {
-    cors: { origin: "*" },
-    pingInterval: 4000,
-    pingTimeout: 5000
+    cors: {
+        origin: "*",
+        methods: ["GET", "POST"]
+    },
+    pingTimeout: 60000,
+    pingInterval: 25000,
+    connectTimeout: 45000,
+    maxHttpBufferSize: 1e6
 });
 
 const rooms = {};
 
-// === REGISTRO Y REGLAMENTO AUTORITATIVO EN BACKEND (FASE 1: MOTOR DE LÓGICA V8.0.2) ===
+// Constantes de Mapeo (Fase 1)
+const TRACK_STEPS = 52;
+const HEX_TRACK_STEPS = 78;
 
-const SQUARE_COLORS_ORDER = ['yellow', 'red', 'green', 'blue', 'purple', 'orange'];
-const HEX_COLORS_ORDER = ['purple', 'red', 'yellow', 'orange', 'blue', 'green'];
+const SQUARE_COLORS_ORDER = ['yellow', 'green', 'red', 'blue'];
+const HEX_COLORS_ORDER = ['yellow', 'purple', 'green', 'red', 'orange', 'blue'];
 
-const HEX_COLOR_INFO = {
-  purple: { color: 'purple', name: 'Morado', startCell: 8, homeEntryCell: 6, starCell: 8, sectorIndex: 0 },
-  green:  { color: 'green',  name: 'Verde',  startCell: 73, homeEntryCell: 71, starCell: 73, sectorIndex: 1 },
-  blue:   { color: 'blue',   name: 'Azul',   startCell: 60, homeEntryCell: 58, starCell: 60, sectorIndex: 2 },
-  orange: { color: 'orange', name: 'Naranja',startCell: 47, homeEntryCell: 45, starCell: 47, sectorIndex: 3 },
-  yellow: { color: 'yellow', name: 'Amarillo',startCell: 34, homeEntryCell: 32, starCell: 34, sectorIndex: 4 },
-  red:    { color: 'red',    name: 'Rojo',   startCell: 21, homeEntryCell: 19, starCell: 21, sectorIndex: 5 }
-};
+const SQUARE_SAFE_CELLS = [
+    1, 9, 14, 22, 27, 35, 40, 48
+];
 
-const STAR_CELLS_HEX = [2, 8, 15, 21, 28, 34, 41, 47, 54, 60, 67, 73];
-const STAR_CELLS_SQUARE = [8, 21, 34, 47, 60, 73];
+const HEX_SAFE_CELLS = [
+    1, 8, 14, 21, 27, 34, 40, 47, 53, 60, 66, 73
+];
 
-function getTrackSteps(isHex) { return isHex ? 77 : 51; }
-function getGoalStep(isHex) { return isHex ? 82 : 56; }
-function getTotalPerimeter(isHex) { return isHex ? 78 : 52; }
+const STAR_CELLS = [9, 22, 35, 48]; // Cuadrado
 
-function getStartOffset(color, isHex) {
-  if (isHex) {
-    const offsets6 = { blue: 1, green: 14, red: 27, yellow: 40, purple: 53, orange: 66 };
-    return offsets6[color] || 0;
-  }
-  const offsets4 = { blue: 1, green: 14, red: 27, yellow: 40, purple: 0, orange: 0 };
-  return offsets4[color] || 0;
-}
-
-function getCellIndexForToken(color, step, isHex) {
-  if (step <= 0) return 'BASE';
-  if (isHex) {
-    const startCell = HEX_COLOR_INFO[color] ? HEX_COLOR_INFO[color].startCell : 8;
-    if (step >= 1 && step <= 77) return (startCell + (step - 1)) % 78;
-    if (step >= 78 && step <= 82) return `H${step - 77}`;
-    return 'GOAL';
-  } else {
-    const trackSteps = 51;
-    const perimeter = 52;
-    if (step >= 1 && step < trackSteps) {
-      return (getStartOffset(color, false) + step) % perimeter;
+function getStartOffset(colorName, isHex) {
+    if (isHex) {
+        switch (colorName) {
+            case 'yellow': return 0;
+            case 'purple': return 13;
+            case 'green': return 26;
+            case 'red': return 39;
+            case 'orange': return 52;
+            case 'blue': return 65;
+            default: return 0;
+        }
+    } else {
+        switch (colorName) {
+            case 'yellow': return 0;
+            case 'green': return 13;
+            case 'red': return 26;
+            case 'blue': return 39;
+            default: return 0;
+        }
     }
-    if (step >= trackSteps && step <= 56) return `H${step - trackSteps + 1}`;
-    return 'GOAL';
-  }
 }
 
-/**
- * Mando de Evaluación Autoritativa de Reglas
- * Aplica: Expulsión de salida obligatoria, Capturas normales y Bonificaciones (+10/+20/+25).
- */
+function getCellIndexForToken(colorName, step, isHex) {
+    if (step < 0) return 'Base';
+    
+    const trackSize = isHex ? HEX_TRACK_STEPS : TRACK_STEPS;
+    const goalStep = isHex ? 85 : 58;
+
+    if (step === goalStep) return 'Meta';
+    if (step >= trackSize) return 'Pasillo';
+
+    const startOffset = getStartOffset(colorName, isHex);
+    let cellIndex = (startOffset + step) % trackSize;
+    if (cellIndex === 0) cellIndex = trackSize;
+    return cellIndex;
+}
+
 function evaluateMoveRulesAuthoritative(tokens, movingTokenIndex, movingPlayerIdx, targetStep, totalPlayers) {
   const isHex = totalPlayers > 4;
-  const currentColorsOrder = isHex ? HEX_COLORS_ORDER : SQUARE_COLORS_ORDER;
-  const movingToken = tokens.find(t => t.playerId === movingPlayerIdx && t.id === movingTokenIndex);
-  if (!movingToken) return { updatedTokens: tokens, capturedTokens: [], bonusSteps: 0, isExpulsion: false };
+  const trackSize = isHex ? HEX_TRACK_STEPS : TRACK_STEPS;
+  const safeCells = isHex ? HEX_SAFE_CELLS : SQUARE_SAFE_CELLS;
+  const perimeter = isHex ? 78 : 52;
 
-  const color = currentColorsOrder[movingPlayerIdx] || 'yellow';
-  const trackSteps = getTrackSteps(isHex);
-  const goalStep = getGoalStep(isHex);
-  const perimeter = getTotalPerimeter(isHex);
-
-  let bonusSteps = 0;
   let capturedTokens = [];
+  let bonusSteps = 0;
   let isExpulsion = false;
 
-  // 1. Regla de Meta
-  if (targetStep === goalStep) {
-    bonusSteps += isHex ? 15 : 10;
-  }
+  const colorName = (isHex ? HEX_COLORS_ORDER : SQUARE_COLORS_ORDER)[movingPlayerIdx] || 'yellow';
+  const movingTokenCell = getCellIndexForToken(colorName, targetStep, isHex);
 
-  // 2. Evaluador de Casilla Final (Salida vs Perímetro vs Pasillo)
-  if (isHex) {
-    const targetCellIndex = getCellIndexForToken(color, targetStep, true);
-    if (typeof targetCellIndex === 'number') {
-      if (targetStep === 1) {
-        // Expulsión por Salida Obligatoria (Ficha que sale a la casilla donde hay 1 propia y 1 enemiga)
-        const cellTokens = tokens.filter(t => t.step > 0 && t.step <= 76 && getCellIndexForToken(currentColorsOrder[t.playerId], t.step, true) === targetCellIndex);
-        const myTokens = cellTokens.filter(t => t.playerId === movingPlayerIdx);
-        const enemyTokens = cellTokens.filter(t => t.playerId !== movingPlayerIdx);
+  if (typeof movingTokenCell === 'number') {
+      const tokensOnSameCell = tokens.filter(t => {
+          if (t.step <= 0 || t.step >= trackSize) return false;
+          const tColor = (isHex ? HEX_COLORS_ORDER : SQUARE_COLORS_ORDER)[t.playerId];
+          return getCellIndexForToken(tColor, t.step, isHex) === movingTokenCell;
+      });
 
-        if (enemyTokens.length > 0 && (myTokens.length >= 1 || cellTokens.length >= 2)) {
-          isExpulsion = true;
-          capturedTokens = enemyTokens;
-          bonusSteps += 0; // Expulsión directa de salida no otorga bonus de captura
-        }
-      } else if (!STAR_CELLS_HEX.includes(targetCellIndex)) {
-        // Captura Normal
-        const enemyTokens = tokens.filter(t => t.playerId !== movingPlayerIdx && t.step > 0 && t.step <= 76 && getCellIndexForToken(currentColorsOrder[t.playerId], t.step, true) === targetCellIndex);
-        if (enemyTokens.length > 0) {
-          capturedTokens = enemyTokens;
-          bonusSteps += 25;
-        }
+      const myTokensOnCell = tokensOnSameCell.filter(t => t.playerId === movingPlayerIdx);
+      const enemyTokensOnCell = tokensOnSameCell.filter(t => t.playerId !== movingPlayerIdx);
+
+      if (targetStep === 1) { // Casilla de Salida (Expulsión obligatoria)
+          if (myTokensOnCell.length === 1 && enemyTokensOnCell.length === 1) {
+              capturedTokens.push(enemyTokensOnCell[0]);
+              isExpulsion = true;
+          }
+      } else if (!safeCells.includes(movingTokenCell)) { // Casillas normales (Captura estándar)
+          if (enemyTokensOnCell.length === 1) {
+              capturedTokens.push(enemyTokensOnCell[0]);
+              bonusSteps = isHex ? 25 : 20;
+          }
       }
-    }
-  } else {
-    // Tablero Estándar (Cuadrado 2, 3, 4 jugadores)
-    if (targetStep >= 1 && targetStep < trackSteps) {
-      const pIndex = (getStartOffset(color, false) + targetStep) % perimeter;
-      const isStartCell = [1, 14, 27, 40, 53, 66].includes(pIndex);
-      const isGoldStar = STAR_CELLS_SQUARE.includes(pIndex);
-
-      if (targetStep === 1) {
-        // Expulsión por Salida Obligatoria
-        const cellTokens = tokens.filter(t => {
-          if (t.step < 1 || t.step >= trackSteps) return false;
-          const oppColor = currentColorsOrder[t.playerId];
-          const oppPIndex = (getStartOffset(oppColor, false) + t.step) % perimeter;
-          return oppPIndex === pIndex;
-        });
-        const enemyTokens = cellTokens.filter(t => t.playerId !== movingPlayerIdx);
-        if (enemyTokens.length > 0) {
-          isExpulsion = true;
-          capturedTokens = enemyTokens;
-          bonusSteps += 0;
-        }
-      } else if (!isStartCell && !isGoldStar) {
-        // Captura Normal
-        const enemyTokens = tokens.filter(t => {
-          if (t.playerId === movingPlayerIdx || t.step < 1 || t.step >= trackSteps) return false;
-          const oppColor = currentColorsOrder[t.playerId];
-          const oppPIndex = (getStartOffset(oppColor, false) + t.step) % perimeter;
-          return oppPIndex === pIndex;
-        });
-        if (enemyTokens.length > 0) {
-          capturedTokens = enemyTokens;
-          bonusSteps += 20;
-        }
-      }
-    }
   }
 
-  // Aplicar movimiento y retornos a casa (step = -1)
-  const updatedTokens = tokens.map(t => {
-    if (t.playerId === movingPlayerIdx && t.id === movingTokenIndex) {
-      return { ...t, step: targetStep };
-    }
-    if (capturedTokens.some(c => c.playerId === t.playerId && c.id === t.id)) {
-      return { ...t, step: -1 };
-    }
-    return t;
-  });
-
-  return { updatedTokens, capturedTokens, bonusSteps, isExpulsion };
-}
-
-/**
- * Evaluación Autoritativa de Penalización por 3 Dobles Consecutivos
- */
-function evaluateThreeDoublesPenaltyAuthoritative(tokens, playerId, lastMovedTokenId) {
-  if (lastMovedTokenId === null || lastMovedTokenId === undefined) {
-    return { updatedTokens: tokens, penalizedToken: null };
-  }
   let penalizedToken = null;
   const updatedTokens = tokens.map(t => {
-    if (t.playerId === playerId && t.id === lastMovedTokenId && t.step > 0) {
-      penalizedToken = t;
-      return { ...t, step: -1 };
-    }
-    return t;
+      const isCaptured = capturedTokens.some(ct => ct.playerId === t.playerId && ct.id === t.id);
+      if (isCaptured) {
+          penalizedToken = { ...t, step: -1 };
+          return penalizedToken;
+      }
+      if (t.playerId === movingPlayerIdx && t.id === movingTokenIndex) {
+          return { ...t, step: targetStep };
+      }
+      return t;
   });
-  return { updatedTokens, penalizedToken };
+  return { updatedTokens, capturedTokens, bonusSteps, isExpulsion };
 }
 
 function generateUniqueRoomId() {
@@ -193,6 +137,37 @@ function generateUniqueRoomId() {
 app.get('/', (req, res) => {
     res.send("Sweety Ludo V21.5 Motor AAA Autoritativo is running.");
 });
+
+/**
+ * Inicialización Autoritativa de Fichas y Contadores por Sala (Fase 2)
+ * Tableros <= 4 jugadores: 4 fichas por jugador.
+ * Tableros >= 5 jugadores: 3 fichas por jugador.
+ */
+function initializeRoomStateAuthoritative(room) {
+    const totalPlayers = room.targetPlayers || room.players.length || 4;
+    const isHex = totalPlayers > 4;
+    const tokensPerPlayer = isHex ? 3 : 4;
+    
+    room.tokens = [];
+    room.consecutiveDoublesMap = {};
+    room.lastMovedTokenMap = {};
+
+    room.players.forEach((player, pIdx) => {
+        room.consecutiveDoublesMap[player.playerId] = 0;
+        room.lastMovedTokenMap[player.playerId] = null;
+
+        for (let tId = 0; tId < tokensPerPlayer; tId++) {
+            room.tokens.push({
+                id: tId,
+                playerId: pIdx,
+                networkPlayerId: player.playerId,
+                step: -1
+            });
+        }
+    });
+
+    console.log(`[AUTORITATIVO QA] 🚀 Sala ${room.id} (${totalPlayers}J - ${isHex ? 'Hexagonal' : 'Cuadrado'}) inicializada con ${room.tokens.length} fichas autoritativas (${tokensPerPlayer} fichas/jugador a paso -1).`);
+}
 
 io.on('connection', (socket) => {
     console.log(`[WS] Nuevo socket conectado: ${socket.id}`);
@@ -246,37 +221,6 @@ io.on('connection', (socket) => {
             targetPlayers: room.targetPlayers
         });
 
-/**
- * Inicialización Autoritativa de Fichas y Contadores por Sala (Fase 2)
- * Tableros <= 4 jugadores: 4 fichas por jugador.
- * Tableros >= 5 jugadores: 3 fichas por jugador.
- */
-function initializeRoomStateAuthoritative(room) {
-    const totalPlayers = room.targetPlayers || room.players.length || 4;
-    const isHex = totalPlayers > 4;
-    const tokensPerPlayer = isHex ? 3 : 4;
-    
-    room.tokens = [];
-    room.consecutiveDoublesMap = {};
-    room.lastMovedTokenMap = {};
-
-    room.players.forEach((player, pIdx) => {
-        room.consecutiveDoublesMap[player.playerId] = 0;
-        room.lastMovedTokenMap[player.playerId] = null;
-
-        for (let tId = 0; tId < tokensPerPlayer; tId++) {
-            room.tokens.push({
-                id: tId,
-                playerId: pIdx,
-                networkPlayerId: player.playerId,
-                step: -1
-            });
-        }
-    });
-
-    console.log(`[AUTORITATIVO QA] 🚀 Sala ${room.id} (${totalPlayers}J - ${isHex ? 'Hexagonal' : 'Cuadrado'}) inicializada con ${room.tokens.length} fichas autoritativas (${tokensPerPlayer} fichas/jugador a paso -1).`);
-}
-
         if (room.players.length === room.targetPlayers) {
             room.gameStarted = true;
             room.currentTurnSlot = 0; // Initialize turn slot
@@ -289,13 +233,14 @@ function initializeRoomStateAuthoritative(room) {
                 roomId: foundRoomId,
                 players: room.players
             });
-
-            // V21.1: Emit event_turn_started directly to unfreeze UI
-            const firstPlayer = room.players[0].playerId;
-            io.in(foundRoomId).emit('event_turn_started', {
-                playerId: firstPlayer,
-                activePlayerId: firstPlayer
-            });
+            
+            setTimeout(() => {
+                const firstPlayer = room.players[0].playerId;
+                io.in(foundRoomId).emit('event_turn_started', {
+                    playerId: firstPlayer,
+                    activePlayerId: firstPlayer
+                });
+            }, 3500);
         }
     });
 
