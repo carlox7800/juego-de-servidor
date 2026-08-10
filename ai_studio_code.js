@@ -17,6 +17,171 @@ const io = new Server(server, {
 
 const rooms = {};
 
+// === REGISTRO Y REGLAMENTO AUTORITATIVO EN BACKEND (FASE 1: MOTOR DE LÓGICA V8.0.2) ===
+
+const SQUARE_COLORS_ORDER = ['yellow', 'red', 'green', 'blue', 'purple', 'orange'];
+const HEX_COLORS_ORDER = ['purple', 'red', 'yellow', 'orange', 'blue', 'green'];
+
+const HEX_COLOR_INFO = {
+  purple: { color: 'purple', name: 'Morado', startCell: 8, homeEntryCell: 6, starCell: 8, sectorIndex: 0 },
+  green:  { color: 'green',  name: 'Verde',  startCell: 73, homeEntryCell: 71, starCell: 73, sectorIndex: 1 },
+  blue:   { color: 'blue',   name: 'Azul',   startCell: 60, homeEntryCell: 58, starCell: 60, sectorIndex: 2 },
+  orange: { color: 'orange', name: 'Naranja',startCell: 47, homeEntryCell: 45, starCell: 47, sectorIndex: 3 },
+  yellow: { color: 'yellow', name: 'Amarillo',startCell: 34, homeEntryCell: 32, starCell: 34, sectorIndex: 4 },
+  red:    { color: 'red',    name: 'Rojo',   startCell: 21, homeEntryCell: 19, starCell: 21, sectorIndex: 5 }
+};
+
+const STAR_CELLS_HEX = [2, 8, 15, 21, 28, 34, 41, 47, 54, 60, 67, 73];
+const STAR_CELLS_SQUARE = [8, 21, 34, 47, 60, 73];
+
+function getTrackSteps(isHex) { return isHex ? 77 : 51; }
+function getGoalStep(isHex) { return isHex ? 82 : 56; }
+function getTotalPerimeter(isHex) { return isHex ? 78 : 52; }
+
+function getStartOffset(color, isHex) {
+  if (isHex) {
+    const offsets6 = { blue: 1, green: 14, red: 27, yellow: 40, purple: 53, orange: 66 };
+    return offsets6[color] || 0;
+  }
+  const offsets4 = { blue: 1, green: 14, red: 27, yellow: 40, purple: 0, orange: 0 };
+  return offsets4[color] || 0;
+}
+
+function getCellIndexForToken(color, step, isHex) {
+  if (step <= 0) return 'BASE';
+  if (isHex) {
+    const startCell = HEX_COLOR_INFO[color] ? HEX_COLOR_INFO[color].startCell : 8;
+    if (step >= 1 && step <= 77) return (startCell + (step - 1)) % 78;
+    if (step >= 78 && step <= 82) return `H${step - 77}`;
+    return 'GOAL';
+  } else {
+    const trackSteps = 51;
+    const perimeter = 52;
+    if (step >= 1 && step < trackSteps) {
+      return (getStartOffset(color, false) + step) % perimeter;
+    }
+    if (step >= trackSteps && step <= 56) return `H${step - trackSteps + 1}`;
+    return 'GOAL';
+  }
+}
+
+/**
+ * Mando de Evaluación Autoritativa de Reglas
+ * Aplica: Expulsión de salida obligatoria, Capturas normales y Bonificaciones (+10/+20/+25).
+ */
+function evaluateMoveRulesAuthoritative(tokens, movingTokenIndex, movingPlayerIdx, targetStep, totalPlayers) {
+  const isHex = totalPlayers > 4;
+  const currentColorsOrder = isHex ? HEX_COLORS_ORDER : SQUARE_COLORS_ORDER;
+  const movingToken = tokens.find(t => t.playerId === movingPlayerIdx && t.id === movingTokenIndex);
+  if (!movingToken) return { updatedTokens: tokens, capturedTokens: [], bonusSteps: 0, isExpulsion: false };
+
+  const color = currentColorsOrder[movingPlayerIdx] || 'yellow';
+  const trackSteps = getTrackSteps(isHex);
+  const goalStep = getGoalStep(isHex);
+  const perimeter = getTotalPerimeter(isHex);
+
+  let bonusSteps = 0;
+  let capturedTokens = [];
+  let isExpulsion = false;
+
+  // 1. Regla de Meta
+  if (targetStep === goalStep) {
+    bonusSteps += isHex ? 15 : 10;
+  }
+
+  // 2. Evaluador de Casilla Final (Salida vs Perímetro vs Pasillo)
+  if (isHex) {
+    const targetCellIndex = getCellIndexForToken(color, targetStep, true);
+    if (typeof targetCellIndex === 'number') {
+      if (targetStep === 1) {
+        // Expulsión por Salida Obligatoria (Ficha que sale a la casilla donde hay 1 propia y 1 enemiga)
+        const cellTokens = tokens.filter(t => t.step > 0 && t.step <= 76 && getCellIndexForToken(currentColorsOrder[t.playerId], t.step, true) === targetCellIndex);
+        const myTokens = cellTokens.filter(t => t.playerId === movingPlayerIdx);
+        const enemyTokens = cellTokens.filter(t => t.playerId !== movingPlayerIdx);
+
+        if (enemyTokens.length > 0 && (myTokens.length >= 1 || cellTokens.length >= 2)) {
+          isExpulsion = true;
+          capturedTokens = enemyTokens;
+          bonusSteps += 0; // Expulsión directa de salida no otorga bonus de captura
+        }
+      } else if (!STAR_CELLS_HEX.includes(targetCellIndex)) {
+        // Captura Normal
+        const enemyTokens = tokens.filter(t => t.playerId !== movingPlayerIdx && t.step > 0 && t.step <= 76 && getCellIndexForToken(currentColorsOrder[t.playerId], t.step, true) === targetCellIndex);
+        if (enemyTokens.length > 0) {
+          capturedTokens = enemyTokens;
+          bonusSteps += 25;
+        }
+      }
+    }
+  } else {
+    // Tablero Estándar (Cuadrado 2, 3, 4 jugadores)
+    if (targetStep >= 1 && targetStep < trackSteps) {
+      const pIndex = (getStartOffset(color, false) + targetStep) % perimeter;
+      const isStartCell = [1, 14, 27, 40, 53, 66].includes(pIndex);
+      const isGoldStar = STAR_CELLS_SQUARE.includes(pIndex);
+
+      if (targetStep === 1) {
+        // Expulsión por Salida Obligatoria
+        const cellTokens = tokens.filter(t => {
+          if (t.step < 1 || t.step >= trackSteps) return false;
+          const oppColor = currentColorsOrder[t.playerId];
+          const oppPIndex = (getStartOffset(oppColor, false) + t.step) % perimeter;
+          return oppPIndex === pIndex;
+        });
+        const enemyTokens = cellTokens.filter(t => t.playerId !== movingPlayerIdx);
+        if (enemyTokens.length > 0) {
+          isExpulsion = true;
+          capturedTokens = enemyTokens;
+          bonusSteps += 0;
+        }
+      } else if (!isStartCell && !isGoldStar) {
+        // Captura Normal
+        const enemyTokens = tokens.filter(t => {
+          if (t.playerId === movingPlayerIdx || t.step < 1 || t.step >= trackSteps) return false;
+          const oppColor = currentColorsOrder[t.playerId];
+          const oppPIndex = (getStartOffset(oppColor, false) + t.step) % perimeter;
+          return oppPIndex === pIndex;
+        });
+        if (enemyTokens.length > 0) {
+          capturedTokens = enemyTokens;
+          bonusSteps += 20;
+        }
+      }
+    }
+  }
+
+  // Aplicar movimiento y retornos a casa (step = -1)
+  const updatedTokens = tokens.map(t => {
+    if (t.playerId === movingPlayerIdx && t.id === movingTokenIndex) {
+      return { ...t, step: targetStep };
+    }
+    if (capturedTokens.some(c => c.playerId === t.playerId && c.id === t.id)) {
+      return { ...t, step: -1 };
+    }
+    return t;
+  });
+
+  return { updatedTokens, capturedTokens, bonusSteps, isExpulsion };
+}
+
+/**
+ * Evaluación Autoritativa de Penalización por 3 Dobles Consecutivos
+ */
+function evaluateThreeDoublesPenaltyAuthoritative(tokens, playerId, lastMovedTokenId) {
+  if (lastMovedTokenId === null || lastMovedTokenId === undefined) {
+    return { updatedTokens: tokens, penalizedToken: null };
+  }
+  let penalizedToken = null;
+  const updatedTokens = tokens.map(t => {
+    if (t.playerId === playerId && t.id === lastMovedTokenId && t.step > 0) {
+      penalizedToken = t;
+      return { ...t, step: -1 };
+    }
+    return t;
+  });
+  return { updatedTokens, penalizedToken };
+}
+
 function generateUniqueRoomId() {
     let roomId;
     do {
@@ -81,10 +246,44 @@ io.on('connection', (socket) => {
             targetPlayers: room.targetPlayers
         });
 
+/**
+ * Inicialización Autoritativa de Fichas y Contadores por Sala (Fase 2)
+ * Tableros <= 4 jugadores: 4 fichas por jugador.
+ * Tableros >= 5 jugadores: 3 fichas por jugador.
+ */
+function initializeRoomStateAuthoritative(room) {
+    const totalPlayers = room.targetPlayers || room.players.length || 4;
+    const isHex = totalPlayers > 4;
+    const tokensPerPlayer = isHex ? 3 : 4;
+    
+    room.tokens = [];
+    room.consecutiveDoublesMap = {};
+    room.lastMovedTokenMap = {};
+
+    room.players.forEach((player, pIdx) => {
+        room.consecutiveDoublesMap[player.playerId] = 0;
+        room.lastMovedTokenMap[player.playerId] = null;
+
+        for (let tId = 0; tId < tokensPerPlayer; tId++) {
+            room.tokens.push({
+                id: tId,
+                playerId: pIdx,
+                networkPlayerId: player.playerId,
+                step: -1
+            });
+        }
+    });
+
+    console.log(`[AUTORITATIVO QA] 🚀 Sala ${room.id} (${totalPlayers}J - ${isHex ? 'Hexagonal' : 'Cuadrado'}) inicializada con ${room.tokens.length} fichas autoritativas (${tokensPerPlayer} fichas/jugador a paso -1).`);
+}
+
         if (room.players.length === room.targetPlayers) {
             room.gameStarted = true;
             room.currentTurnSlot = 0; // Initialize turn slot
             
+            // Inicializar memoria de fichas autoritativas (Fase 2)
+            initializeRoomStateAuthoritative(room);
+
             io.in(foundRoomId).emit('match_found', {
                 id: foundRoomId,
                 roomId: foundRoomId,
@@ -188,6 +387,9 @@ io.on('connection', (socket) => {
             room.gameStarted = true;
             room.currentTurnSlot = 0;
             
+            // Inicializar memoria de fichas autoritativas (Fase 2)
+            initializeRoomStateAuthoritative(room);
+
             io.in(cleanRoomCode).emit('match_found', {
                 id: cleanRoomCode,
                 roomId: cleanRoomCode,
@@ -246,6 +448,45 @@ io.on('connection', (socket) => {
         const d1 = Math.floor(Math.random() * 6) + 1;
         const d2 = Math.floor(Math.random() * 6) + 1;
         
+        const room = rooms[roomId];
+        let isThreeDoublesPenalty = false;
+
+        if (room && room.consecutiveDoublesMap) {
+            if (d1 === d2) {
+                room.consecutiveDoublesMap[playerId] = (room.consecutiveDoublesMap[playerId] || 0) + 1;
+                console.log(`[AUTORITATIVO QA] 🎲 Jugador ${playerId} en Sala ${roomId} obtuvo DOBLES [${d1}, ${d2}]. Consecutivos: ${room.consecutiveDoublesMap[playerId]}`);
+                
+                if (room.consecutiveDoublesMap[playerId] >= 3) {
+                    isThreeDoublesPenalty = true;
+                    room.consecutiveDoublesMap[playerId] = 0;
+                    console.log(`[AUTORITATIVO FASE 3] 🚫 ¡3er DOBLE ALCANZADO! Ejecutando castigo autoritativo para Jugador ${playerId}.`);
+                    
+                    const lastTokenId = room.lastMovedTokenMap ? room.lastMovedTokenMap[playerId] : null;
+                    if (lastTokenId !== null && lastTokenId !== undefined && room.tokens) {
+                        const pIdx = room.players.findIndex(p => p.playerId === playerId);
+                        const targetPlayerIdx = pIdx !== -1 ? pIdx : 0;
+                        
+                        const tokenToPenalize = room.tokens.find(t => (t.networkPlayerId === playerId || t.playerId === targetPlayerIdx) && t.id === lastTokenId && t.step > 0);
+                        if (tokenToPenalize) {
+                            tokenToPenalize.step = -1;
+                            console.log(`[AUTORITATIVO FASE 3] 🏠 Ficha ${lastTokenId} del Jugador ${playerId} castigada y enviada a la base (step = -1).`);
+                            
+                            // Emitir orden autoritativa de retorno a casa
+                            io.in(roomId).emit('event_token_moved', {
+                                playerId: playerId,
+                                tokenId: lastTokenId,
+                                newPathIndex: -1,
+                                isBotMove: false
+                            });
+                        }
+                    }
+                }
+            } else {
+                room.consecutiveDoublesMap[playerId] = 0;
+                console.log(`[AUTORITATIVO QA] 🎲 Jugador ${playerId} en Sala ${roomId} obtuvo [${d1}, ${d2}]. Contador de dobles reiniciado a 0.`);
+            }
+        }
+
         io.in(roomId).emit('event_dice_result', {
             playerId: playerId,
             diceRoll1: d1,
@@ -256,12 +497,62 @@ io.on('connection', (socket) => {
 
     socket.on('intent_move_token', (payload) => {
         const { roomId, playerId, tokenId, newPathIndex, isBotMove } = payload;
+
+        const room = rooms[roomId];
+        let capturedToEmit = [];
+
+        if (room && room.tokens) {
+            const pIdx = room.players.findIndex(p => p.playerId === playerId);
+            const targetPlayerIdx = pIdx !== -1 ? pIdx : 0;
+            const isHex = (room.targetPlayers || room.players.length) > 4;
+
+            const token = room.tokens.find(t => (t.networkPlayerId === playerId || t.playerId === targetPlayerIdx) && t.id === tokenId);
+            if (token) {
+                const oldStep = token.step;
+                token.step = newPathIndex;
+                room.lastMovedTokenMap[playerId] = tokenId;
+
+                const colorName = (isHex ? HEX_COLORS_ORDER : SQUARE_COLORS_ORDER)[targetPlayerIdx] || 'yellow';
+                const cellDesc = getCellIndexForToken(colorName, newPathIndex, isHex);
+
+                console.log(`[AUTORITATIVO QA] ♟️ Sala ${roomId} | Jugador ${playerId} (Slot ${targetPlayerIdx} - ${colorName}) movió Ficha ${tokenId} de paso ${oldStep} -> ${newPathIndex} (Casilla: ${cellDesc}).`);
+
+                // Evaluación autoritativa en segundo plano (Fase 3)
+                const { updatedTokens, capturedTokens, bonusSteps, isExpulsion } = evaluateMoveRulesAuthoritative(
+                    room.tokens, tokenId, targetPlayerIdx, newPathIndex, room.targetPlayers || room.players.length
+                );
+
+                if (capturedTokens.length > 0) {
+                    console.log(`[AUTORITATIVO FASE 3] ⚔️ Captura/Expulsión detectada para ${capturedTokens.length} ficha(s) enemiga(s) (Expulsión salida: ${isExpulsion}, Bonus pasos: +${bonusSteps}). Emitiendo órdenes a clientes...`);
+                    room.tokens = updatedTokens;
+                    capturedToEmit = capturedTokens;
+                }
+            }
+        }
+
+        // 1. Emitir movimiento original
         io.in(roomId).emit('event_token_moved', {
             playerId,
             tokenId,
             newPathIndex,
             isBotMove
         });
+
+        // 2. Emitir capturas/expulsiones autoritativas para las fichas enemigas enviadas a casa
+        if (capturedToEmit.length > 0 && room) {
+            capturedToEmit.forEach(cToken => {
+                const enemyPlayer = room.players[cToken.playerId];
+                const enemyNetworkId = enemyPlayer ? enemyPlayer.playerId : String(cToken.playerId);
+                
+                io.in(roomId).emit('event_token_moved', {
+                    playerId: enemyNetworkId,
+                    tokenId: cToken.id,
+                    newPathIndex: -1,
+                    isBotMove: false
+                });
+                console.log(`[AUTORITATIVO FASE 3] 💥 ORDEN MANDATORIA EMITIDA: Ficha ${cToken.id} del Jugador ${enemyNetworkId} expulsada a la base (step = -1).`);
+            });
+        }
     });
 
     socket.on('intent_end_turn', (payload) => {
