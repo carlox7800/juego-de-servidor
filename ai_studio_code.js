@@ -1,4 +1,4 @@
-// === Sweety Ludo Server V23.0 Base + Fases 6 y 7 (Reglas Autoritativas v8.0.5) ===
+// === Sweety Ludo Server V24.0 (v8.0.6 - Freeze Fix) ===
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -17,7 +17,7 @@ const io = new Server(server, {
 
 const rooms = {};
 
-// === REGISTRO Y REGLAMENTO AUTORITATIVO EN BACKEND (FASE 1 - 7: MOTOR V8.0.5) ===
+// === REGISTRO Y REGLAMENTO AUTORITATIVO EN BACKEND (FASE 1: MOTOR DE LÓGICA V8.0.2) ===
 
 const SQUARE_COLORS_ORDER = ['yellow', 'red', 'green', 'blue', 'purple', 'orange'];
 const HEX_COLORS_ORDER = ['purple', 'red', 'yellow', 'orange', 'blue', 'green'];
@@ -32,10 +32,10 @@ const HEX_COLOR_INFO = {
 };
 
 const STAR_CELLS_HEX = [2, 8, 15, 21, 28, 34, 41, 47, 54, 60, 67, 73];
-const STAR_CELLS_SQUARE = [1, 8, 14, 21, 27, 34, 40, 47]; // Casillas Seguras (4 Salidas: 1,14,27,40 + 4 Estrellas: 8,21,34,47)
+const STAR_CELLS_SQUARE = [8, 21, 34, 47, 60, 73];
 
 function getTrackSteps(isHex) { return isHex ? 77 : 51; }
-function getGoalStep(isHex) { return isHex ? 82 : 57; }
+function getGoalStep(isHex) { return isHex ? 82 : 56; }
 function getTotalPerimeter(isHex) { return isHex ? 78 : 52; }
 
 function getStartOffset(color, isHex) {
@@ -57,88 +57,17 @@ function getCellIndexForToken(color, step, isHex) {
   } else {
     const trackSteps = 51;
     const perimeter = 52;
-    if (step >= 1 && step <= trackSteps) {
-      return (getStartOffset(color, false) + step - 1) % perimeter;
+    if (step >= 1 && step < trackSteps) {
+      return (getStartOffset(color, false) + step) % perimeter;
     }
-    if (step > trackSteps && step <= 56) return `H${step - trackSteps}`;
+    if (step >= trackSteps && step <= 56) return `H${step - trackSteps + 1}`;
     return 'GOAL';
   }
 }
 
 /**
- * FASE 6 & 7: Validador Físico de Trayecto y Barreras
- * (R1: Dado 5 de salida, R2: Bloqueo por barrera, R4: Overshoot meta)
- */
-function isPathBlockedAuthoritative(tokens, movingPlayerIdx, movingTokenId, oldStep, newStep, totalPlayers) {
-  const isHex = totalPlayers > 4;
-  const currentColorsOrder = isHex ? HEX_COLORS_ORDER : SQUARE_COLORS_ORDER;
-  const token = tokens.find(t => t.playerId === movingPlayerIdx && t.id === movingTokenId);
-  if (!token) return true;
-
-  const color = currentColorsOrder[movingPlayerIdx] || 'yellow';
-  const goalStep = getGoalStep(isHex);
-
-  // R4: Límite de Meta (Overshoot check)
-  if (newStep > goalStep) {
-    console.log(`[AUTORITATIVO FASE 6] 🚫 Movimiento rechazado por rebote/overshoot (Meta: ${goalStep}, Intento: ${newStep}).`);
-    return true;
-  }
-
-  // R1: Salida de la Base (paso <= 0 a paso 1)
-  if (oldStep <= 0) {
-    if (newStep !== 1) return true;
-    const perimeter = isHex ? 78 : 52;
-    const startPIndex = (getStartOffset(color, isHex) + 1 - 1) % perimeter;
-    
-    // Contar fichas en la casilla de salida
-    const cellTokens = tokens.filter(t => {
-      if (t.step < 1 || t.step > (isHex ? 76 : 51)) return false;
-      const tColor = currentColorsOrder[t.playerId];
-      const tPIndex = (getStartOffset(tColor, isHex) + t.step - 1) % perimeter;
-      return tPIndex === startPIndex;
-    });
-
-    const myTokens = cellTokens.filter(t => t.playerId === movingPlayerIdx);
-    const enemyTokens = cellTokens.filter(t => t.playerId !== movingPlayerIdx);
-
-    // Si hay 2+ fichas en salida y no es un caso 1v1 de expulsión de salida, está bloqueada
-    if (cellTokens.length >= 2) {
-      const isExpellable = (myTokens.length === 1 && enemyTokens.length === 1);
-      if (!isExpellable) {
-        console.log(`[AUTORITATIVO FASE 7] 🚫 Casilla de salida bloqueada por barrera de ${cellTokens.length} fichas.`);
-        return true;
-      }
-    }
-    return false;
-  }
-
-  // R2: Verificación de Barreras en Trayecto Intermedio
-  const perimeterLimit = isHex ? 76 : 51;
-  const perimeter = isHex ? 78 : 52;
-  const stepsToCheck = Math.min(newStep, perimeterLimit);
-  
-  for (let s = oldStep + 1; s <= stepsToCheck; s++) {
-    const pIndex = (getStartOffset(color, isHex) + s - 1) % perimeter;
-    let cellTokensCount = 0;
-    tokens.forEach(t => {
-      if (t.step >= 1 && t.step <= perimeterLimit) {
-        const tColor = currentColorsOrder[t.playerId];
-        const tPIndex = (getStartOffset(tColor, isHex) + t.step - 1) % perimeter;
-        if (tPIndex === pIndex) cellTokensCount++;
-      }
-    });
-    if (cellTokensCount >= 2) {
-      console.log(`[AUTORITATIVO FASE 7] 🚫 Barrera física detectada en paso ${s} (Índice casilla ${pIndex}). Movimiento bloqueado.`);
-      return true;
-    }
-  }
-
-  return false;
-}
-
-/**
- * Mando de Evaluación Autoritativa de Reglas (FASE 3 & FASE 7)
- * Aplica: Expulsión de salida obligatoria, Capturas en casillas normales y Bonificaciones (+10/+20/+25).
+ * Mando de Evaluación Autoritativa de Reglas
+ * Aplica: Expulsión de salida obligatoria, Capturas normales y Bonificaciones (+10/+20/+25).
  */
 function evaluateMoveRulesAuthoritative(tokens, movingTokenIndex, movingPlayerIdx, targetStep, totalPlayers) {
   const isHex = totalPlayers > 4;
@@ -155,16 +84,17 @@ function evaluateMoveRulesAuthoritative(tokens, movingTokenIndex, movingPlayerId
   let capturedTokens = [];
   let isExpulsion = false;
 
-  // 1. Regla de Meta (R5)
+  // 1. Regla de Meta
   if (targetStep === goalStep) {
     bonusSteps += isHex ? 15 : 10;
   }
 
-  // 2. Evaluador de Casilla Final (Salida vs Perímetro No Seguro - R6 & R7)
+  // 2. Evaluador de Casilla Final (Salida vs Perímetro vs Pasillo)
   if (isHex) {
     const targetCellIndex = getCellIndexForToken(color, targetStep, true);
     if (typeof targetCellIndex === 'number') {
       if (targetStep === 1) {
+        // Expulsión por Salida Obligatoria
         const cellTokens = tokens.filter(t => t.step > 0 && t.step <= 76 && getCellIndexForToken(currentColorsOrder[t.playerId], t.step, true) === targetCellIndex);
         const myTokens = cellTokens.filter(t => t.playerId === movingPlayerIdx);
         const enemyTokens = cellTokens.filter(t => t.playerId !== movingPlayerIdx);
@@ -172,10 +102,12 @@ function evaluateMoveRulesAuthoritative(tokens, movingTokenIndex, movingPlayerId
         if (enemyTokens.length > 0 && (myTokens.length >= 1 || cellTokens.length >= 2)) {
           isExpulsion = true;
           capturedTokens = enemyTokens;
+          bonusSteps += 0;
         }
       } else if (!STAR_CELLS_HEX.includes(targetCellIndex)) {
+        // Captura Normal
         const enemyTokens = tokens.filter(t => t.playerId !== movingPlayerIdx && t.step > 0 && t.step <= 76 && getCellIndexForToken(currentColorsOrder[t.playerId], t.step, true) === targetCellIndex);
-        if (enemyTokens.length === 1) {
+        if (enemyTokens.length > 0) {
           capturedTokens = enemyTokens;
           bonusSteps += 25;
         }
@@ -183,33 +115,34 @@ function evaluateMoveRulesAuthoritative(tokens, movingTokenIndex, movingPlayerId
     }
   } else {
     // Tablero Estándar (Cuadrado 2, 3, 4 jugadores)
-    if (targetStep >= 1 && targetStep <= trackSteps) {
-      const pIndex = (getStartOffset(color, false) + targetStep - 1) % perimeter;
-      const isSafeCell = STAR_CELLS_SQUARE.includes(pIndex);
+    if (targetStep >= 1 && targetStep < trackSteps) {
+      const pIndex = (getStartOffset(color, false) + targetStep) % perimeter;
+      const isStartCell = [1, 14, 27, 40, 53, 66].includes(pIndex);
+      const isGoldStar = STAR_CELLS_SQUARE.includes(pIndex);
 
       if (targetStep === 1) {
         // Expulsión por Salida Obligatoria
         const cellTokens = tokens.filter(t => {
-          if (t.step < 1 || t.step > trackSteps) return false;
+          if (t.step < 1 || t.step >= trackSteps) return false;
           const oppColor = currentColorsOrder[t.playerId];
-          const oppPIndex = (getStartOffset(oppColor, false) + t.step - 1) % perimeter;
+          const oppPIndex = (getStartOffset(oppColor, false) + t.step) % perimeter;
           return oppPIndex === pIndex;
         });
         const enemyTokens = cellTokens.filter(t => t.playerId !== movingPlayerIdx);
-        const myTokens = cellTokens.filter(t => t.playerId === movingPlayerIdx);
-        if (enemyTokens.length === 1 && myTokens.length >= 1) {
+        if (enemyTokens.length > 0) {
           isExpulsion = true;
           capturedTokens = enemyTokens;
+          bonusSteps += 0;
         }
-      } else if (!isSafeCell) {
-        // Captura Normal en casilla NO segura
+      } else if (!isStartCell && !isGoldStar) {
+        // Captura Normal
         const enemyTokens = tokens.filter(t => {
-          if (t.playerId === movingPlayerIdx || t.step < 1 || t.step > trackSteps) return false;
+          if (t.playerId === movingPlayerIdx || t.step < 1 || t.step >= trackSteps) return false;
           const oppColor = currentColorsOrder[t.playerId];
-          const oppPIndex = (getStartOffset(oppColor, false) + t.step - 1) % perimeter;
+          const oppPIndex = (getStartOffset(oppColor, false) + t.step) % perimeter;
           return oppPIndex === pIndex;
         });
-        if (enemyTokens.length === 1) {
+        if (enemyTokens.length > 0) {
           capturedTokens = enemyTokens;
           bonusSteps += 20;
         }
@@ -258,11 +191,13 @@ function generateUniqueRoomId() {
 }
 
 app.get('/', (req, res) => {
-    res.send("Sweety Ludo V21.5 Motor AAA Autoritativo is running.");
+    res.send("Sweety Ludo V24.0 (v8.0.6 - Freeze Fix) Motor AAA Autoritativo is running.");
 });
 
 /**
  * Inicialización Autoritativa de Fichas y Contadores por Sala (Fase 2)
+ * Tableros <= 4 jugadores: 4 fichas por jugador.
+ * Tableros >= 5 jugadores: 3 fichas por jugador.
  */
 function initializeRoomStateAuthoritative(room) {
     const totalPlayers = room.targetPlayers || room.players.length || 4;
@@ -272,15 +207,10 @@ function initializeRoomStateAuthoritative(room) {
     room.tokens = [];
     room.consecutiveDoublesMap = {};
     room.lastMovedTokenMap = {};
-    room.lastDiceRoll = {};
-    room.extraTurnPending = {};
-    room.barrierLifetimes = {};
 
     room.players.forEach((player, pIdx) => {
         room.consecutiveDoublesMap[player.playerId] = 0;
         room.lastMovedTokenMap[player.playerId] = null;
-        room.lastDiceRoll[player.playerId] = null;
-        room.extraTurnPending[player.playerId] = false;
 
         for (let tId = 0; tId < tokensPerPlayer; tId++) {
             room.tokens.push({
@@ -340,6 +270,7 @@ io.on('connection', (socket) => {
         socket.roomId = foundRoomId;
         socket.playerId = playerId;
 
+        // Broadcast room_updated to all so UI refreshes
         io.in(foundRoomId).emit('room_updated', {
             id: foundRoomId,
             players: room.players,
@@ -350,6 +281,7 @@ io.on('connection', (socket) => {
             room.gameStarted = true;
             room.currentTurnSlot = 0;
             
+            // Inicializar memoria de fichas autoritativas (Fase 2)
             initializeRoomStateAuthoritative(room);
 
             io.in(foundRoomId).emit('match_found', {
@@ -358,6 +290,7 @@ io.on('connection', (socket) => {
                 players: room.players
             });
 
+            // V21.1: Emit event_turn_started directly to unfreeze UI
             const firstPlayer = room.players[0].playerId;
             io.in(foundRoomId).emit('event_turn_started', {
                 playerId: firstPlayer,
@@ -396,6 +329,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('join_private_room', (payload) => {
+        // V21.1: Robust trimming to prevent "Sala privada no encontrada" by keyboard spaces
         let rawCode = payload.roomCode || payload.code || "";
         const cleanRoomCode = String(rawCode).trim();
         const { playerId, playerName } = payload;
@@ -403,6 +337,7 @@ io.on('connection', (socket) => {
         const room = rooms[cleanRoomCode];
 
         if (!room || !room.isPrivate) {
+            // V23.0 Late Reconnection Guardian
             socket.emit('event_room_expired', { roomId: cleanRoomCode, reason: "Sala ya no existe" });
             socket.emit('room_error', { message: "Sala privada no encontrada" });
             return;
@@ -422,6 +357,7 @@ io.on('connection', (socket) => {
                 isBot: false
             });
         } else {
+            // V23.0 Base Fix para Modo Competitivo: Manejar la reconexión igual que en join_room
             const wasOffline = !existingPlayer.isConnected || existingPlayer.isBot;
             existingPlayer.socketId = socket.id;
             existingPlayer.isConnected = true;
@@ -467,6 +403,7 @@ io.on('connection', (socket) => {
         }
     });
 
+    // 🚪🔥 Unirse / Reconectarse a una sala (V21.5 Reconnection handler) 🚪🔥
     socket.on('join_room', (payload) => {
         const roomId = typeof payload === 'string' ? payload : payload.roomId;
         const playerId = typeof payload === 'string' ? null : payload.playerId;
@@ -499,6 +436,7 @@ io.on('connection', (socket) => {
                 }
             }
         } else {
+            // V23.0 Late Reconnection Guardian
             socket.emit('event_room_expired', { roomId: roomId, reason: "Sala ya no existe" });
         }
     });
@@ -511,12 +449,7 @@ io.on('connection', (socket) => {
         const room = rooms[roomId];
         let isThreeDoublesPenalty = false;
 
-        if (room) {
-            room.lastDiceRoll = room.lastDiceRoll || {};
-            room.lastDiceRoll[playerId] = [d1, d2];
-            room.consecutiveDoublesMap = room.consecutiveDoublesMap || {};
-            room.extraTurnPending = room.extraTurnPending || {};
-
+        if (room && room.consecutiveDoublesMap) {
             if (d1 === d2) {
                 room.consecutiveDoublesMap[playerId] = (room.consecutiveDoublesMap[playerId] || 0) + 1;
                 console.log(`[AUTORITATIVO QA] 🎲 Jugador ${playerId} en Sala ${roomId} obtuvo DOBLES [${d1}, ${d2}]. Consecutivos: ${room.consecutiveDoublesMap[playerId]}`);
@@ -524,7 +457,6 @@ io.on('connection', (socket) => {
                 if (room.consecutiveDoublesMap[playerId] >= 3) {
                     isThreeDoublesPenalty = true;
                     room.consecutiveDoublesMap[playerId] = 0;
-                    room.extraTurnPending[playerId] = false;
                     console.log(`[AUTORITATIVO FASE 3] 🚫 ¡3er DOBLE ALCANZADO! Ejecutando castigo autoritativo para Jugador ${playerId}.`);
                     
                     const lastTokenId = room.lastMovedTokenMap ? room.lastMovedTokenMap[playerId] : null;
@@ -537,6 +469,9 @@ io.on('connection', (socket) => {
                             tokenToPenalize.step = -1;
                             console.log(`[AUTORITATIVO FASE 3] 🏠 Ficha ${lastTokenId} del Jugador ${playerId} castigada y enviada a la base (step = -1).`);
                             
+                            // V8.0.6: Emitir penalización ANTES del resultado de dados
+                            // para que el cliente limpie el estado capturado correctamente
+                            // ANTES de procesar el nuevo estado de dados.
                             io.in(roomId).emit('event_token_moved', {
                                 playerId: playerId,
                                 tokenId: lastTokenId,
@@ -545,14 +480,10 @@ io.on('connection', (socket) => {
                             });
                         }
                     }
-                } else {
-                    // Turno Extra por Dobles (R9)
-                    room.extraTurnPending[playerId] = true;
-                    console.log(`[AUTORITATIVO FASE 6] 🎲 Jugador ${playerId} tiene un TURNO EXTRA concedido por dobles.`);
                 }
             } else {
                 room.consecutiveDoublesMap[playerId] = 0;
-                room.extraTurnPending[playerId] = false;
+                console.log(`[AUTORITATIVO QA] 🎲 Jugador ${playerId} en Sala ${roomId} obtuvo [${d1}, ${d2}]. Contador de dobles reiniciado a 0.`);
             }
         }
 
@@ -569,35 +500,15 @@ io.on('connection', (socket) => {
 
         const room = rooms[roomId];
         let capturedToEmit = [];
-        let bonusStepsEarned = 0;
 
         if (room && room.tokens) {
             const pIdx = room.players.findIndex(p => p.playerId === playerId);
             const targetPlayerIdx = pIdx !== -1 ? pIdx : 0;
-            const totalPlayers = room.targetPlayers || room.players.length;
-            const isHex = totalPlayers > 4;
+            const isHex = (room.targetPlayers || room.players.length) > 4;
 
             const token = room.tokens.find(t => (t.networkPlayerId === playerId || t.playerId === targetPlayerIdx) && t.id === tokenId);
             if (token) {
                 const oldStep = token.step;
-
-                // --- FASE 6 (R1): Validación de Salida de Base (Dado 5 o Suma 5) ---
-                if (oldStep <= 0 && newPathIndex === 1) {
-                    const rolls = room.lastDiceRoll ? room.lastDiceRoll[playerId] : null;
-                    const hasFive = rolls && (rolls[0] === 5 || rolls[1] === 5 || (rolls[0] + rolls[1] === 5));
-                    if (!hasFive && !isBotMove) {
-                        console.log(`[AUTORITATIVO RECHAZADO] 🚫 Jugador ${playerId} intentó salir de base sin dado 5 (Dados actuales: ${rolls}).`);
-                        return;
-                    }
-                }
-
-                // --- FASE 6 (R4) & FASE 7 (R2): Validación de Barreras Físicas y Límite de Meta ---
-                const isBlocked = isPathBlockedAuthoritative(room.tokens, targetPlayerIdx, tokenId, oldStep, newPathIndex, totalPlayers);
-                if (isBlocked && !isBotMove) {
-                    console.log(`[AUTORITATIVO RECHAZADO] 🚫 Movimiento de Ficha ${tokenId} del Jugador ${playerId} bloq. por barrera u overshoot (${oldStep} -> ${newPathIndex}).`);
-                    return;
-                }
-
                 token.step = newPathIndex;
                 room.lastMovedTokenMap[playerId] = tokenId;
 
@@ -606,27 +517,25 @@ io.on('connection', (socket) => {
 
                 console.log(`[AUTORITATIVO QA] ♟️ Sala ${roomId} | Jugador ${playerId} (Slot ${targetPlayerIdx} - ${colorName}) movió Ficha ${tokenId} de paso ${oldStep} -> ${newPathIndex} (Casilla: ${cellDesc}).`);
 
-                // Evaluación autoritativa de capturas y expulsiones (Fase 3, 6, 7)
+                // Evaluación autoritativa en segundo plano (Fase 3)
                 const { updatedTokens, capturedTokens, bonusSteps, isExpulsion } = evaluateMoveRulesAuthoritative(
-                    room.tokens, tokenId, targetPlayerIdx, newPathIndex, totalPlayers
+                    room.tokens, tokenId, targetPlayerIdx, newPathIndex, room.targetPlayers || room.players.length
                 );
 
-                if (capturedTokens.length > 0 || bonusSteps > 0) {
-                    console.log(`[AUTORITATIVO FASE 7] ⚔️ Captura/Expulsión/Bono en sala ${roomId} (Expulsión: ${isExpulsion}, Bonus: +${bonusSteps}).`);
+                if (capturedTokens.length > 0) {
+                    console.log(`[AUTORITATIVO FASE 3] ⚔️ Captura/Expulsión detectada para ${capturedTokens.length} ficha(s) enemiga(s) (Expulsión salida: ${isExpulsion}, Bonus pasos: +${bonusSteps}). Emitiendo órdenes a clientes...`);
                     room.tokens = updatedTokens;
                     capturedToEmit = capturedTokens;
-                    bonusStepsEarned = bonusSteps;
                 }
             }
         }
 
-        // 1. Emitir movimiento original con bonus steps informados
+        // 1. Emitir movimiento original
         io.in(roomId).emit('event_token_moved', {
             playerId,
             tokenId,
             newPathIndex,
-            isBotMove,
-            bonusSteps: bonusStepsEarned
+            isBotMove
         });
 
         // 2. Emitir capturas/expulsiones autoritativas para las fichas enemigas enviadas a casa
@@ -641,7 +550,7 @@ io.on('connection', (socket) => {
                     newPathIndex: -1,
                     isBotMove: false
                 });
-                console.log(`[AUTORITATIVO FASE 7] 💥 ORDEN MANDATORIA EMITIDA: Ficha ${cToken.id} del Jugador ${enemyNetworkId} expulsada a la base (step = -1).`);
+                console.log(`[AUTORITATIVO FASE 3] 💥 ORDEN MANDATORIA EMITIDA: Ficha ${cToken.id} del Jugador ${enemyNetworkId} expulsada a la base (step = -1).`);
             });
         }
     });
@@ -653,75 +562,31 @@ io.on('connection', (socket) => {
         let nextNetworkId;
         let targetSlot = 0;
 
-        if (!room) return;
-
-        // --- FASE 6 (R9): Concesión de Turno Extra por Dobles ---
-        const currentSlotPlayer = room.players[room.currentTurnSlot || 0];
-        const currentNetworkId = currentSlotPlayer ? currentSlotPlayer.playerId : null;
-
-        if (currentNetworkId && room.extraTurnPending && room.extraTurnPending[currentNetworkId]) {
-            room.extraTurnPending[currentNetworkId] = false;
-            console.log(`[AUTORITATIVO FASE 6] 🔁 TURNO EXTRA CONCEDIDO para Jugador ${currentNetworkId}. El turno se mantiene.`);
-            
-            io.in(roomId).emit('event_turn_started', {
-                playerId: currentNetworkId,
-                activePlayerId: currentNetworkId,
-                isExtraTurn: true
-            });
-            return;
-        }
-
         if (explicitNetworkId) {
+            // V24.0 (NUEVO LUDO WEB): By-pass directo por UUID.
             nextNetworkId = explicitNetworkId;
             if (room && room.players) {
                 targetSlot = room.players.findIndex(p => p.playerId === explicitNetworkId);
                 if (targetSlot === -1) targetSlot = 0;
             }
         } else {
-            const colorIdToSlotIndex = { 0: 0, 2: 1, 1: 2, 3: 3, 4: 4, 5: 5 };
+            // V23.0 (SWEETY LUDO ANDROID LEGACY): Se mantiene intacto.
+            const colorIdToSlotIndex = {
+                0: 0, 2: 1, 1: 2, 3: 3, 4: 4, 5: 5
+            };
+
             const parsedColorId = parseInt(nextPlayerId !== undefined ? nextPlayerId : nextTurnId, 10);
             targetSlot = colorIdToSlotIndex[parsedColorId];
+            
             if (targetSlot === undefined) targetSlot = 0;
+
             nextNetworkId = String(parsedColorId); 
             if (room && room.players && room.players[targetSlot]) {
                 nextNetworkId = room.players[targetSlot].playerId;
             }
         }
 
-        // --- FASE 7 (R3): Trackeo de Barreras (Barrier Lifetimes) ---
-        if (room.tokens) {
-            room.barrierLifetimes = room.barrierLifetimes || {};
-            const totalPlayers = room.targetPlayers || room.players.length;
-            const isHex = totalPlayers > 4;
-            const currentColorsOrder = isHex ? HEX_COLORS_ORDER : SQUARE_COLORS_ORDER;
-            const perimeter = isHex ? 78 : 52;
-            const perimeterLimit = isHex ? 76 : 51;
-
-            room.tokens.forEach(t => {
-                const globalId = `${t.playerId}_${t.id}`;
-                if (t.step >= 1 && t.step <= perimeterLimit) {
-                    const pIndex = (getStartOffset(currentColorsOrder[t.playerId], isHex) + t.step - 1) % perimeter;
-                    const cellCount = room.tokens.filter(other => {
-                        if (other.step < 1 || other.step > perimeterLimit) return false;
-                        const oColor = currentColorsOrder[other.playerId];
-                        const oPIndex = (getStartOffset(oColor, isHex) + other.step - 1) % perimeter;
-                        return oPIndex === pIndex;
-                    }).length;
-
-                    if (cellCount >= 2) {
-                        if (t.playerId === room.currentTurnSlot) {
-                            room.barrierLifetimes[globalId] = (room.barrierLifetimes[globalId] || 0) + 1;
-                        }
-                    } else {
-                        room.barrierLifetimes[globalId] = 0;
-                    }
-                } else {
-                    room.barrierLifetimes[globalId] = 0;
-                }
-            });
-        }
-
-        // V21.5 Autoritativo: Decrementar gracia al jugador offline
+        // V21.5 Autoritativo: Decrementar gracia al jugador que acaba de terminar su turno
         if (room && room.players && room.currentTurnSlot !== undefined) {
             const prevPlayer = room.players[room.currentTurnSlot];
             if (prevPlayer && prevPlayer.isConnected === false && prevPlayer._graceTurnsLeft !== undefined) {
@@ -730,7 +595,9 @@ io.on('connection', (socket) => {
                 
                 if (prevPlayer._graceTurnsLeft <= 0) {
                     console.log(`[VERDUGO V21.5] Jugador ${prevPlayer.playerId} agotó su gracia. EXPULSADO.`);
+                    
                     io.in(roomId).emit('event_player_expelled', { playerId: prevPlayer.playerId });
+                    
                     prevPlayer.isExpelled = true;
                     prevPlayer.isBot = false;
                     
@@ -747,7 +614,9 @@ io.on('connection', (socket) => {
         }
 
         // Actualizar el turno actual en la sala
-        room.currentTurnSlot = targetSlot;
+        if (room) {
+            room.currentTurnSlot = targetSlot;
+        }
 
         io.in(roomId).emit('event_turn_started', {
             playerId: nextNetworkId,
@@ -790,6 +659,9 @@ io.on('connection', (socket) => {
                     
                     if (room.gameStarted) {
                         player.isBot = true;
+                        // V21.9: Grace turns depend on room size:
+                        // 2-player duel = 5 grace turns (give more time for reconnect)
+                        // 4+ players    = 2 grace turns (keep game flowing fast)
                         const graceTurns = room.targetPlayers === 2 ? 5 : 2;
                         player._graceTurnsLeft = graceTurns;
                         console.log(`[GRACIA V21.9] Jugador ${playerId} desconectado. Sala ${room.targetPlayers}p = Bot con ${graceTurns} turnos de gracia.`);
@@ -805,6 +677,7 @@ io.on('connection', (socket) => {
                         playerId: playerId
                     });
 
+                    // Si todos los jugadores se desconectaron, destruimos la sala
                     const allDisconnected = room.players.every(p => p.isConnected === false);
                     if (allDisconnected) {
                         delete rooms[roomId];
@@ -818,5 +691,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`[SERVER] Sweety Ludo WebSocket Server V23.0 Base + Fases 6 y 7 Autoritativas (v8.0.5) en puerto ${PORT}`);
+    console.log(`[SERVER] Sweety Ludo WebSocket Server V24.0 (v8.0.6 - Freeze Fix: isRollingRef + hasRolledRef + isProcessingTimeoutRef) en puerto ${PORT}`);
 });
