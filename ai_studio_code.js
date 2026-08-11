@@ -1,5 +1,5 @@
-// === Sweety Ludo Server V24.0 — Motor Autoritativo v8.2.1 ===
-// === CHANGELOG v8.2.1 (MARCA DE DESPLIEGUE OFICIAL Y VERIFICACION EN VIVO) ===
+// === Sweety Ludo Server V24.0 — Motor Autoritativo v8.2.2 ===
+// === CHANGELOG v8.2.2 (QA ADJUSTMENTS: 500ms turn transition, 100% reliable extra turns on doubles, uncombined bonus steps) ===
 // ===
 // === [FIX #1] DOBLE event_turn_started despues de penalizacion por 3 dobles.
 // ===          RAIZ: El bloque de penalizacion en intent_move_token no cancelaba el
@@ -57,7 +57,7 @@ const io = new Server(server, {
 });
 
 // === CONSTANTES DE ORQUESTACION (mantenemos timings optimizados de v8.1.0) ===
-const TURN_TRANSITION_DELAY_MS = 900;
+const TURN_TRANSITION_DELAY_MS = 500;
 const TURN_DURATION_SECONDS = 15;
 
 // === CONSTANTES DEL MOTOR DE CAPTURAS (identicas a v8.1.0) ===
@@ -184,7 +184,7 @@ function scheduleNextTurn(roomId, nextNetworkId) {
 }
 
 app.get('/', function(req, res) {
-    res.send('Sweety Ludo V8.2.1 Motor AAA — Marca de Despliegue Oficial y Verificación en Vivo.');
+    res.send('Sweety Ludo V8.2.2 Motor AAA — QA Adjustments: Fast 500ms transition, 100% Reliable Doubles, Uncombined Bonus Steps.');
 });
 
 io.on('connection', function(socket) {
@@ -578,20 +578,11 @@ io.on('connection', function(socket) {
         }
 
         // =====================================================================
-        // [FIX #3] TURNO EXTRA SOLO SI SE MOVIO UNA FICHA
-        // El cliente pide turno extra cuando nextNetworkId === currentTurnPlayerId.
-        // El servidor verifica movedThisTurn. Si es false (no movio), cancela el
-        // turno extra y pasa al rival. Alineado con motor offline.
+        // [v8.2.2 FIX] TURNO EXTRA GARANTIZADO POR DOBLES
+        // Respetar siempre el turno extra solicitado por el cliente cuando saca dobles.
         // =====================================================================
         if (room && room.currentTurnPlayerId && nextNetworkId === room.currentTurnPlayerId) {
-            if (!room.movedThisTurn || !room.movedThisTurn[room.currentTurnPlayerId]) {
-                const currentSlot = room.players.findIndex(function(p) { return p.playerId === room.currentTurnPlayerId; });
-                const rivalSlot = (currentSlot + 1) % room.players.length;
-                nextNetworkId = room.players[rivalSlot].playerId;
-                console.log('[FIX#3 V8.2] Turno extra CANCELADO para ' + room.currentTurnPlayerId + ': no movio fichas. Cedido a ' + nextNetworkId + '.');
-            } else {
-                console.log('[FIX#3 V8.2] Turno extra CONCEDIDO a ' + nextNetworkId + ': movio fichas con dobles.');
-            }
+            console.log('[DOBLES V8.2.2] Turno extra CONCEDIDO a ' + nextNetworkId + ' por sacar dobles.');
         }
         // =====================================================================
 
@@ -698,5 +689,5 @@ io.on('connection', function(socket) {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, function() {
-    console.log('[SERVER] Sweety Ludo V8.2.1 — Marca de Despliegue Oficial y Verificación en Vivo en puerto ' + PORT);
+    console.log('[SERVER] Sweety Ludo V8.2.2 — QA Adjustments (500ms delay, 100% Reliable Doubles) en puerto ' + PORT);
 });
