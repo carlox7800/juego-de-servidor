@@ -388,11 +388,16 @@ io.on('connection', function(socket) {
         const d1 = Math.floor(Math.random() * 6) + 1;
         const d2 = Math.floor(Math.random() * 6) + 1;
 
+        let isPenaltyNow = false;
+
         if (room) {
             if (!room.consecutiveDoubles) room.consecutiveDoubles = {};
             if (d1 === d2) {
                 room.consecutiveDoubles[playerId] = (room.consecutiveDoubles[playerId] || 0) + 1;
                 console.log('[DOBLES V8.2] ' + playerId + ' lleva ' + room.consecutiveDoubles[playerId] + ' dobles consecutivos.');
+                if (room.consecutiveDoubles[playerId] >= 3) {
+                    isPenaltyNow = true;
+                }
             } else {
                 room.consecutiveDoubles[playerId] = 0;
             }
@@ -405,6 +410,54 @@ io.on('connection', function(socket) {
             diceValues: [d1, d2],
             vals: [d1, d2]
         });
+
+        // [FIX #4 MEJORADO] Penalización INMEDIATA al sacar el 3er doble
+        if (isPenaltyNow && room && room.tokenState) {
+            const movingSlot = room.players.findIndex(function(p) { return p.playerId === playerId; });
+            if (movingSlot >= 0 && movingSlot < room.tokenState.length) {
+                // Penalizamos la última ficha movida si la hay, sino la más avanzada
+                let tokenToPenalize = 0;
+                if (room.lastMovedTokenId && room.lastMovedTokenId[playerId] !== undefined) {
+                    tokenToPenalize = room.lastMovedTokenId[playerId];
+                } else {
+                    let maxStep = -1;
+                    for (let i = 0; i < room.tokenState[movingSlot].length; i++) {
+                        const s = room.tokenState[movingSlot][i];
+                        if (s > maxStep && s < 57) {
+                            maxStep = s;
+                            tokenToPenalize = i;
+                        }
+                    }
+                }
+
+                console.log('[PENALIZACION INMEDIATA V8.2] 3 dobles. Ficha ' + tokenToPenalize + ' a base.');
+                room.tokenState[movingSlot][tokenToPenalize] = -1;
+                room.consecutiveDoubles[playerId] = 0;
+                room.penaltyJustApplied = true;
+
+                // Pequeño delay para que el cliente vea los dados antes de la explosión
+                setTimeout(function() {
+                    io.in(roomId).emit('event_token_moved', {
+                        playerId: playerId,
+                        tokenId: tokenToPenalize,
+                        newPathIndex: -1,
+                        isBotMove: false,
+                        isPenalty: true
+                    });
+
+                    // Ceder turno al rival automaticamente
+                    const nextSlot = (movingSlot + 1) % room.players.length;
+                    const nextNetworkId = room.players[nextSlot].playerId;
+                    
+                    if (!room.movedThisTurn) room.movedThisTurn = {};
+                    room.movedThisTurn[playerId] = false;
+                    
+                    scheduleNextTurn(roomId, nextNetworkId);
+                }, 500);
+                
+                return;
+            }
+        }
     });
 
     // === [v8.2.0] INTENT_MOVE_TOKEN — MOTOR AUTORITATIVO ===
@@ -416,52 +469,15 @@ io.on('connection', function(socket) {
         const isBotMove = payload.isBotMove;
         const room = rooms[roomId];
 
-        // [FIX #2] Ignorar si partida terminada
         if (room && room.gameOver) {
             return;
         }
 
-        // =====================================================================
-        // [FIX #4] PENALIZACION POR 3 DOBLES — EVALUACION ANTICIPADA
-        // Antes de emitir el movimiento real, verificar si hay penalizacion.
-        // Si hay 3 dobles, solo emitir evento de penalizacion (ir a base).
-        // La ficha nunca llega a la casilla real en los clientes.
-        // =====================================================================
-        if (room && room.tokenState && room.consecutiveDoubles && room.consecutiveDoubles[playerId] >= 3) {
-            const movingSlot = room.players.findIndex(function(p) { return p.playerId === playerId; });
-            if (movingSlot >= 0 && movingSlot < room.tokenState.length) {
-                console.log('[PENALIZACION V8.2] ' + playerId + ' tiene 3 dobles. Ficha ' + tokenId + ' va directo a base (casilla ' + newPathIndex + ' nunca se muestra).');
-
-                room.tokenState[movingSlot][tokenId] = -1;
-                room.consecutiveDoubles[playerId] = 0;
-
-                // Solo emitir evento de penalizacion — NO el movimiento real
-                io.in(roomId).emit('event_token_moved', {
-                    playerId: playerId,
-                    tokenId: tokenId,
-                    newPathIndex: -1,
-                    isBotMove: isBotMove || false,
-                    isPenalty: true
-                });
-
-                // [FIX #1] Marcar flag para que intent_end_turn ignore el duplicado
-                room.penaltyJustApplied = true;
-
-                // Ceder turno al rival automaticamente
-                const nextSlot = (movingSlot + 1) % room.players.length;
-                const nextNetworkId = room.players[nextSlot].playerId;
-                console.log('[PENALIZACION V8.2] Turno cedido a ' + nextNetworkId + '.');
-
-                if (!room.movedThisTurn) room.movedThisTurn = {};
-                room.movedThisTurn[playerId] = false;
-
-                scheduleNextTurn(roomId, nextNetworkId);
-                return; // Early return — no procesar el movimiento real
-            }
+        // Registrar la última ficha movida para penalizaciones futuras
+        if (room) {
+            if (!room.lastMovedTokenId) room.lastMovedTokenId = {};
+            room.lastMovedTokenId[playerId] = tokenId;
         }
-        // =====================================================================
-        // FIN FIX #4
-        // =====================================================================
 
         // Emitir el movimiento normal
         io.in(roomId).emit('event_token_moved', {
