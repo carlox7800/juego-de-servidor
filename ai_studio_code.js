@@ -1,16 +1,44 @@
-// === Sweety Ludo Server V24.0 — Motor Autoritativo v8.1.0 ===
-// === CHANGELOG v8.1.0:
-// ===   [OPT #1] TURN_DURATION_SECONDS: Reducido de 30s a 15s para ritmo más dinámico.
-// ===   [OPT #2] TURN_TRANSITION_DELAY_MS: Reducido de 2000ms a 900ms.
-// ===            La animación de paso tarda ~250ms cada una. Un movimiento largo de 12 pasos
-// ===            tarda máx ~3s, pero el cliente ya anima mientras el servidor espera.
-// ===            900ms protege las animaciones de movimientos cortos/medianos sin freezar el juego.
-// ===   [FIX #3] Motor de Capturas Autoritativo: El servidor mantiene room.tokenState para
-// ===            rastrear la posición de cada ficha. Al procesar intent_move_token, detecta si
-// ===            la casilla destino contiene una ficha enemiga (fuera de casilla segura) y emite
-// ===            event_token_moved con newPathIndex: -1 para la ficha capturada.
-// ===   [FIX #4] Penalización por 3 dobles: Al tercer doble consecutivo, la ficha activa
-// ===            regresa a base (newPathIndex: -1) antes de finalizar el turno.
+// === Sweety Ludo Server V24.0 — Motor Autoritativo v8.2.0 ===
+// === CHANGELOG v8.2.0 (FORENSIC QA FIXES — basados en logs de partida en vivo):
+// ===
+// === [FIX #1] DOBLE event_turn_started despues de penalizacion por 3 dobles.
+// ===          RAIZ: El bloque de penalizacion en intent_move_token no cancelaba el
+// ===          intent_end_turn subsiguiente. El cliente emitia intent_end_turn DESPUES
+// ===          de recibir el evento de penalizacion, lo que hacia que scheduleNextTurn
+// ===          se llamara DOS veces: una desde el bloque de penalizacion y otra desde
+// ===          intent_end_turn normal.
+// ===          SOLUCION: room.penaltyJustApplied = true como flag que bloquea el
+// ===          scheduleNextTurn de intent_end_turn cuando ya lo proceso la penalizacion.
+// ===          El flag se limpia inmediatamente despues de usarse.
+// ===
+// === [FIX #2] event_turn_started continua emitiendose despues del fin de partida.
+// ===          RAIZ: El servidor no tenia flag room.gameOver. Al finalizar la partida,
+// ===          los clientes seguian enviando intent_end_turn y el servidor seguia
+// ===          procesando turnos.
+// ===          SOLUCION: room.gameOver = true cuando se detecta intent_token_moved
+// ===          con newPathIndex >= 57 (meta) y todas las fichas del jugador estan
+// ===          en meta. scheduleNextTurn verifica room.gameOver y aborta si esta activo.
+// ===          intent_end_turn tambien verifica room.gameOver antes de procesar.
+// ===
+// === [FIX #3] Turno extra concedido con dobles incluso cuando NO hubo movimiento valido.
+// ===          RAIZ: El cliente lee su contador pendingExtraTurns y concede el turno
+// ===          extra aunque no haya podido mover ninguna ficha. En el motor offline,
+// ===          el doble SOLO concede turno extra si el jugador efectivamente movio al
+// ===          menos una ficha en ese turno.
+// ===          SOLUCION: room.movedThisTurn[playerId] = true/false. Se marca true en
+// ===          intent_move_token. En intent_end_turn, si nextPlayerId === currentPlayerId
+// ===          (senal de turno extra) pero movedThisTurn es false, el servidor ignora
+// ===          el turno extra y pasa el turno al rival.
+// ===
+// === [FIX #4] Animacion incoherente en penalizacion 3 dobles: ficha avanza y luego
+// ===          regresa a base en dos eventos separados.
+// ===          RAIZ: El servidor emitia primero el event_token_moved con newPathIndex real
+// ===          (relay del movimiento), y DESPUES emitia el evento de penalizacion con -1.
+// ===          El cliente veia la ficha avanzar y luego saltar a la base.
+// ===          SOLUCION: En intent_move_token, si el jugador tiene 3 dobles ANTES de
+// ===          procesar el movimiento, se salta el relay normal y solo se emite el evento
+// ===          de penalizacion (newPathIndex: -1, isPenalty: true). La ficha nunca llega
+// ===          a la casilla real, va directamente a la base. Mas coherente con motor offline.
 // ===
 
 const express = require('express');
@@ -28,42 +56,23 @@ const io = new Server(server, {
     pingTimeout: 5000
 });
 
-// === [v8.1.0] CONSTANTES DE ORQUESTACIÓN AUTORITATIVA ===
-// Reducido de 2000ms a 900ms: punto dulce para absorber animaciones cortas/medianas
-// sin que la partida se sienta congelada entre turnos.
+// === CONSTANTES DE ORQUESTACION (mantenemos timings optimizados de v8.1.0) ===
 const TURN_TRANSITION_DELAY_MS = 900;
-
-// Reducido de 30s a 15s: ritmo más dinámico. El timer del servidor es el árbitro.
 const TURN_DURATION_SECONDS = 15;
 
-// === [v8.1.0] CONSTANTES DEL MOTOR DE CAPTURAS ===
-// Réplica exacta de la lógica del cliente (GameBoard.tsx / online-game-engine.tsx)
-// para que el servidor evalúe capturas con la misma matemática.
-
-// Perímetro del tablero Parchís estándar (52 casillas, 0-indexed internamente, 1-indexed al comparar)
+// === CONSTANTES DEL MOTOR DE CAPTURAS (identicas a v8.1.0) ===
 const PERIMETER = 52;
-
-// Offset de inicio de cada color en el perímetro (1-indexed, como en GameBoard.tsx START_OFFSETS)
-// Slot 0 → yellow (offset 40), Slot 1 → red (offset 27), Slot 2 → green (offset 14), Slot 3 → blue (offset 1)
-const START_OFFSETS_BY_SLOT = [40, 27, 14, 1, 0, 0]; // hasta 6 jugadores
-
-// Casillas seguras en el perímetro (1-indexed). Incluye salidas y estrellas doradas.
-// Ref: isSafeCell en GameBoard.tsx: [1, 8, 14, 21, 27, 34, 40, 47]
+const START_OFFSETS_BY_SLOT = [40, 27, 14, 1, 0, 0];
 const SAFE_PERIMETER_CELLS = new Set([1, 8, 14, 21, 27, 34, 40, 47]);
 
-// Función: ¿es segura la casilla perimetral pIndex (1-indexed)?
 function isSafeCell(pIndex) {
     return SAFE_PERIMETER_CELLS.has(pIndex);
 }
 
-// Función: Obtiene el índice perimetral (1-indexed, 1..52) de un token dado su slot y step.
-// step 1..51 = casilla en el perímetro, step 0 = base, step 57 = meta (fuera del perímetro).
 function getPerimeterIndex(slotIndex, step) {
-    if (step <= 0 || step > 51) return -1; // fuera del perímetro
-    return ((START_OFFSETS_BY_SLOT[slotIndex] + step - 1) % PERIMETER) + 1; // 1-indexed
+    if (step <= 0 || step > 51) return -1;
+    return ((START_OFFSETS_BY_SLOT[slotIndex] + step - 1) % PERIMETER) + 1;
 }
-
-// === FIN CONSTANTES MOTOR CAPTURAS ===
 
 const rooms = {};
 
@@ -75,20 +84,27 @@ function generateUniqueRoomId() {
     return roomId;
 }
 
-// === [v8.1.0] INICIALIZAR ESTADO DE FICHAS DE LA SALA ===
-// Crea la estructura room.tokenState: un array de fichas para todos los jugadores.
-// tokenState[slotIdx][tokenId] = step (-1=base, 0=en_base_lista, 1-51=perimetro, 57=meta)
-// NOTA: Todos comienzan en step -1 (dentro de la casa, no desplegados).
-// El cliente envía step=0 cuando saca la ficha de la base, step=1..N para movimientos.
 function initTokenState(numPlayers) {
     const state = [];
     for (let i = 0; i < numPlayers; i++) {
-        state.push([-1, -1, -1, -1]); // 4 fichas por jugador, todas en casa
+        state.push([-1, -1, -1, -1]);
     }
     return state;
 }
 
-// === [v8.0.10] FUNCIÓN AUTORITATIVA: TIMER DE TURNO ===
+// [v8.2.0 FIX #2] Verificar si un jugador ha ganado (todas sus fichas en meta, step >= 57)
+function checkWinner(room) {
+    if (!room.tokenState) return null;
+    for (let slotIdx = 0; slotIdx < room.players.length; slotIdx++) {
+        const tokens = room.tokenState[slotIdx];
+        if (tokens && tokens.every(function(step) { return step >= 57; })) {
+            return room.players[slotIdx].playerId;
+        }
+    }
+    return null;
+}
+
+// === FUNCION AUTORITATIVA: TIMER DE TURNO ===
 function startTurnTimer(roomId, activePlayerId) {
     const room = rooms[roomId];
     if (!room) return;
@@ -98,47 +114,64 @@ function startTurnTimer(roomId, activePlayerId) {
         room.activeTurnTimeout = null;
     }
 
-    console.log(`[TIMER V8.1] Turno iniciado para ${activePlayerId} en sala ${roomId}. Tiempo: ${TURN_DURATION_SECONDS}s`);
+    console.log('[TIMER V8.2] Turno iniciado para ' + activePlayerId + ' en sala ' + roomId + '. Tiempo: ' + TURN_DURATION_SECONDS + 's');
 
-    room.activeTurnTimeout = setTimeout(() => {
+    room.activeTurnTimeout = setTimeout(function() {
         room.activeTurnTimeout = null;
 
-        if (room.currentTurnPlayerId !== activePlayerId) {
-            console.log(`[TIMER V8.1] Timeout ignorado: el turno ya cambió de ${activePlayerId}.`);
+        // [v8.2.0 FIX #2] No procesar timeout si la partida ya termino
+        if (room.gameOver) {
+            console.log('[TIMER V8.2] Timeout ignorado: partida ya terminada en sala ' + roomId + '.');
             return;
         }
 
-        const player = room.players ? room.players.find(p => p.playerId === activePlayerId) : null;
+        if (room.currentTurnPlayerId !== activePlayerId) {
+            console.log('[TIMER V8.2] Timeout ignorado: el turno ya cambio de ' + activePlayerId + '.');
+            return;
+        }
+
+        const player = room.players ? room.players.find(function(p) { return p.playerId === activePlayerId; }) : null;
         if (player && player.isConnected && player.socketId) {
-            console.log(`[TIMER V8.1] ¡Tiempo agotado! Notificando a ${activePlayerId} para jugada automática.`);
+            console.log('[TIMER V8.2] Tiempo agotado! Notificando a ' + activePlayerId + '.');
             io.to(player.socketId).emit('event_turn_timeout', {
                 playerId: activePlayerId,
                 reason: 'turn_timer_expired'
             });
-        } else {
-            console.log(`[TIMER V8.1] Timeout de ${activePlayerId} ignorado: jugador desconectado o sin socket.`);
         }
     }, TURN_DURATION_SECONDS * 1000);
 }
 
-// === [v8.0.10] FUNCIÓN AUXILIAR: EMITIR INICIO DE TURNO CON DELAY ===
+// === FUNCION AUXILIAR: EMITIR INICIO DE TURNO CON DELAY ===
 function scheduleNextTurn(roomId, nextNetworkId) {
     const room = rooms[roomId];
     if (!room) return;
 
-    room.isTransitioning = true;
-    console.log(`[TRANSICIÓN V8.1] Sala ${roomId}: transición activa. Próximo jugador: ${nextNetworkId}. Delay: ${TURN_TRANSITION_DELAY_MS}ms`);
+    // [v8.2.0 FIX #2] Abortar si la partida ya termino
+    if (room.gameOver) {
+        console.log('[TRANSICION V8.2] Sala ' + roomId + ': partida terminada. Turno para ' + nextNetworkId + ' CANCELADO.');
+        return;
+    }
 
-    setTimeout(() => {
-        if (!rooms[roomId]) {
-            console.log(`[TRANSICIÓN V8.1] Sala ${roomId} ya no existe al completar el delay. Abortando.`);
+    room.isTransitioning = true;
+
+    setTimeout(function() {
+        if (!rooms[roomId]) return;
+
+        // [v8.2.0 FIX #2] Re-verificar game over despues del delay
+        if (room.gameOver) {
+            room.isTransitioning = false;
+            console.log('[TRANSICION V8.2] Sala ' + roomId + ': partida terminada durante delay. CANCELADO.');
             return;
         }
 
         room.isTransitioning = false;
         room.currentTurnPlayerId = nextNetworkId;
 
-        console.log(`[TRANSICIÓN V8.1] Sala ${roomId}: emitiendo event_turn_started para ${nextNetworkId}.`);
+        // [v8.2.0 FIX #3] Resetear movedThisTurn al iniciar nuevo turno
+        if (!room.movedThisTurn) room.movedThisTurn = {};
+        room.movedThisTurn[nextNetworkId] = false;
+
+        console.log('[TRANSICION V8.2] Sala ' + roomId + ': emitiendo event_turn_started para ' + nextNetworkId + '.');
         io.in(roomId).emit('event_turn_started', {
             playerId: nextNetworkId,
             activePlayerId: nextNetworkId,
@@ -150,23 +183,25 @@ function scheduleNextTurn(roomId, nextNetworkId) {
     }, TURN_TRANSITION_DELAY_MS);
 }
 
-app.get('/', (req, res) => {
-    res.send("Sweety Ludo V8.1.0 Motor AAA Autoritativo — Capturas + Timing Optimizado.");
+app.get('/', function(req, res) {
+    res.send('Sweety Ludo V8.2.0 Motor AAA — QA Forensic Fixes: double-turn, game-over, extra-turn, penalty-anim.');
 });
 
-io.on('connection', (socket) => {
-    console.log(`[WS] Nuevo socket conectado: ${socket.id}`);
+io.on('connection', function(socket) {
+    console.log('[WS] Nuevo socket conectado: ' + socket.id);
 
-    socket.on('register_identity', (payload) => {
+    socket.on('register_identity', function(payload) {
         socket.playerId = payload.playerId;
-        console.log(`[AUTH] Socket ${socket.id} registrado como PlayerID: ${socket.playerId}`);
     });
 
-    socket.on('join_matchmaking', (payload) => {
-        const { playerId, playerName, targetPlayers, mode } = payload;
+    socket.on('join_matchmaking', function(payload) {
+        const playerId = payload.playerId;
+        const playerName = payload.playerName;
+        const targetPlayers = payload.targetPlayers;
         
         let foundRoomId = null;
-        for (const [roomId, room] of Object.entries(rooms)) {
+        for (const roomId in rooms) {
+            const room = rooms[roomId];
             if (!room.isPrivate && room.targetPlayers === targetPlayers && room.players.length < targetPlayers) {
                 foundRoomId = roomId;
                 break;
@@ -181,231 +216,188 @@ io.on('connection', (socket) => {
                 players: [],
                 targetPlayers: targetPlayers || 2,
                 gameStarted: false,
+                gameOver: false,
                 isTransitioning: false,
                 currentTurnPlayerId: null,
                 activeTurnTimeout: null,
-                tokenState: null,       // [v8.1.0] Estado de fichas
-                consecutiveDoubles: {}, // [v8.1.0] Contador de dobles consecutivos por jugador
+                tokenState: null,
+                consecutiveDoubles: {},
+                movedThisTurn: {},
+                penaltyJustApplied: false
             };
         }
 
         const room = rooms[foundRoomId];
-        if (!room.players.find(p => p.playerId === playerId)) {
-            room.players.push({ 
-                playerId, 
-                playerName, 
-                socketId: socket.id,
-                isConnected: true,
-                isBot: false
-            });
+        if (!room.players.find(function(p) { return p.playerId === playerId; })) {
+            room.players.push({ playerId: playerId, playerName: playerName, socketId: socket.id, isConnected: true, isBot: false });
         }
         
         socket.join(foundRoomId);
         socket.roomId = foundRoomId;
         socket.playerId = playerId;
 
-        io.in(foundRoomId).emit('room_updated', {
-            id: foundRoomId,
-            players: room.players,
-            targetPlayers: room.targetPlayers
-        });
+        io.in(foundRoomId).emit('room_updated', { id: foundRoomId, players: room.players, targetPlayers: room.targetPlayers });
 
         if (room.players.length === room.targetPlayers) {
             room.gameStarted = true;
             room.currentTurnSlot = 0;
-            
-            // [v8.1.0] Inicializar estado de fichas al comenzar la partida
+            room.gameOver = false;
             room.tokenState = initTokenState(room.players.length);
             room.consecutiveDoubles = {};
-            room.players.forEach(p => { room.consecutiveDoubles[p.playerId] = 0; });
-            
-            io.in(foundRoomId).emit('match_found', {
-                id: foundRoomId,
-                roomId: foundRoomId,
-                players: room.players
+            room.movedThisTurn = {};
+            room.penaltyJustApplied = false;
+            room.players.forEach(function(p) {
+                room.consecutiveDoubles[p.playerId] = 0;
+                room.movedThisTurn[p.playerId] = false;
             });
-
-            const firstPlayer = room.players[0].playerId;
-            scheduleNextTurn(foundRoomId, firstPlayer);
+            
+            io.in(foundRoomId).emit('match_found', { id: foundRoomId, roomId: foundRoomId, players: room.players });
+            scheduleNextTurn(foundRoomId, room.players[0].playerId);
         }
     });
 
-    socket.on('create_private_room', (payload) => {
-        const { playerId, playerName, targetPlayers } = payload;
+    socket.on('create_private_room', function(payload) {
+        const playerId = payload.playerId;
+        const playerName = payload.playerName;
+        const targetPlayers = payload.targetPlayers;
         const roomId = generateUniqueRoomId();
         rooms[roomId] = {
             id: roomId,
             isPrivate: true,
-            players: [{ 
-                playerId, 
-                playerName, 
-                socketId: socket.id,
-                isConnected: true,
-                isBot: false
-            }],
+            players: [{ playerId: playerId, playerName: playerName, socketId: socket.id, isConnected: true, isBot: false }],
             targetPlayers: targetPlayers || 2,
             gameStarted: false,
+            gameOver: false,
             isTransitioning: false,
             currentTurnPlayerId: null,
             activeTurnTimeout: null,
-            tokenState: null,       // [v8.1.0]
-            consecutiveDoubles: {}, // [v8.1.0]
+            tokenState: null,
+            consecutiveDoubles: {},
+            movedThisTurn: {},
+            penaltyJustApplied: false
         };
         socket.join(roomId);
         socket.roomId = roomId;
         socket.playerId = playerId;
-        
         socket.emit('private_room_created', { roomCode: roomId, id: roomId });
-        
-        socket.emit('room_updated', {
-            id: roomId,
-            players: rooms[roomId].players,
-            targetPlayers: rooms[roomId].targetPlayers
-        });
+        socket.emit('room_updated', { id: roomId, players: rooms[roomId].players, targetPlayers: rooms[roomId].targetPlayers });
     });
 
-    socket.on('join_private_room', (payload) => {
-        let rawCode = payload.roomCode || payload.code || "";
+    socket.on('join_private_room', function(payload) {
+        const rawCode = payload.roomCode || payload.code || '';
         const cleanRoomCode = String(rawCode).trim();
-        const { playerId, playerName } = payload;
+        const playerId = payload.playerId;
+        const playerName = payload.playerName;
         
         const room = rooms[cleanRoomCode];
 
         if (!room || !room.isPrivate) {
-            socket.emit('event_room_expired', { roomId: cleanRoomCode, reason: "Sala ya no existe" });
-            socket.emit('room_error', { message: "Sala privada no encontrada" });
+            socket.emit('event_room_expired', { roomId: cleanRoomCode, reason: 'Sala ya no existe' });
+            socket.emit('room_error', { message: 'Sala privada no encontrada' });
             return;
         }
 
-        const existingPlayer = room.players.find(p => p.playerId === playerId);
+        const existingPlayer = room.players.find(function(p) { return p.playerId === playerId; });
         if (!existingPlayer) {
             if (room.players.length >= room.targetPlayers) {
-                socket.emit('room_error', { message: "La sala está llena" });
+                socket.emit('room_error', { message: 'La sala esta llena' });
                 return;
             }
-            room.players.push({ 
-                playerId, 
-                playerName, 
-                socketId: socket.id,
-                isConnected: true,
-                isBot: false
-            });
+            room.players.push({ playerId: playerId, playerName: playerName, socketId: socket.id, isConnected: true, isBot: false });
         } else {
             const wasOffline = !existingPlayer.isConnected || existingPlayer.isBot;
             existingPlayer.socketId = socket.id;
             existingPlayer.isConnected = true;
             existingPlayer.isBot = false;
             delete existingPlayer._graceTurnsLeft;
-            console.log(`[RECONEXIÓN] Jugador ${playerId} volvió a sala privada ${cleanRoomCode} vía JOIN_PRIVATE`);
-            
             if (wasOffline && room.gameStarted) {
-                io.in(cleanRoomCode).emit('event_player_reconnected', {
-                    playerId: playerId
-                });
+                io.in(cleanRoomCode).emit('event_player_reconnected', { playerId: playerId });
             }
         }
         
         socket.join(cleanRoomCode);
         socket.roomId = cleanRoomCode;
         socket.playerId = playerId;
-
-        io.in(cleanRoomCode).emit('room_updated', {
-            id: cleanRoomCode,
-            players: room.players,
-            targetPlayers: room.targetPlayers
-        });
+        io.in(cleanRoomCode).emit('room_updated', { id: cleanRoomCode, players: room.players, targetPlayers: room.targetPlayers });
 
         if (room.players.length === room.targetPlayers && !room.gameStarted) {
             room.gameStarted = true;
             room.currentTurnSlot = 0;
-            
-            // [v8.1.0] Inicializar estado de fichas
+            room.gameOver = false;
             room.tokenState = initTokenState(room.players.length);
             room.consecutiveDoubles = {};
-            room.players.forEach(p => { room.consecutiveDoubles[p.playerId] = 0; });
-            
-            io.in(cleanRoomCode).emit('match_found', {
-                id: cleanRoomCode,
-                roomId: cleanRoomCode,
-                players: room.players
+            room.movedThisTurn = {};
+            room.penaltyJustApplied = false;
+            room.players.forEach(function(p) {
+                room.consecutiveDoubles[p.playerId] = 0;
+                room.movedThisTurn[p.playerId] = false;
             });
-
-            const firstPlayer = room.players[0].playerId;
-            scheduleNextTurn(cleanRoomCode, firstPlayer);
+            io.in(cleanRoomCode).emit('match_found', { id: cleanRoomCode, roomId: cleanRoomCode, players: room.players });
+            scheduleNextTurn(cleanRoomCode, room.players[0].playerId);
         }
     });
 
-    socket.on('join_room', (payload) => {
+    socket.on('join_room', function(payload) {
         const roomId = typeof payload === 'string' ? payload : payload.roomId;
         const playerId = typeof payload === 'string' ? null : payload.playerId;
-
         socket.join(roomId);
         socket.roomId = roomId;
         socket.playerId = playerId;
-
         const room = rooms[roomId];
         if (room && room.players) {
-            const player = room.players.find(p => p.playerId === playerId);
+            const player = room.players.find(function(p) { return p.playerId === playerId; });
             if (player) {
                 const wasOffline = !player.isConnected || player.isBot;
                 player.socketId = socket.id;
                 player.isConnected = true;
                 player.isBot = false;
                 delete player._graceTurnsLeft;
-                console.log(`[RECONEXIÓN] Jugador ${playerId} volvió a sala ${roomId} (socket: ${socket.id})`);
-                
-                io.in(roomId).emit('room_updated', {
-                    id: roomId,
-                    players: room.players,
-                    targetPlayers: room.targetPlayers
-                });
-                
+                io.in(roomId).emit('room_updated', { id: roomId, players: room.players, targetPlayers: room.targetPlayers });
                 if (wasOffline && room.gameStarted) {
-                    io.in(roomId).emit('event_player_reconnected', {
-                        playerId: playerId
-                    });
+                    io.in(roomId).emit('event_player_reconnected', { playerId: playerId });
                 }
             }
         } else {
-            socket.emit('event_room_expired', { roomId: roomId, reason: "Sala ya no existe" });
+            socket.emit('event_room_expired', { roomId: roomId, reason: 'Sala ya no existe' });
         }
     });
 
-    // === [v8.0.10] INTENT_ROLL_DICE — CON GUARDS AUTORITATIVOS ===
-    socket.on('intent_roll_dice', (payload) => {
-        const { roomId, playerId } = payload;
+    // === INTENT_ROLL_DICE ===
+    socket.on('intent_roll_dice', function(payload) {
+        const roomId = payload.roomId;
+        const playerId = payload.playerId;
         const room = rooms[roomId];
 
+        if (room && room.gameOver) {
+            console.log('[GUARD V8.2] intent_roll_dice de ' + playerId + ' RECHAZADO: partida terminada.');
+            return;
+        }
         if (room && room.isTransitioning) {
-            console.log(`[GUARD V8.1] intent_roll_dice de ${playerId} RECHAZADO: sala ${roomId} en transición de turno.`);
+            console.log('[GUARD V8.2] intent_roll_dice RECHAZADO: en transicion.');
             return;
         }
-
         if (room && room.currentTurnPlayerId && room.currentTurnPlayerId !== playerId) {
-            console.log(`[GUARD V8.1] intent_roll_dice de ${playerId} RECHAZADO: turno actual es de ${room.currentTurnPlayerId}.`);
+            console.log('[GUARD V8.2] intent_roll_dice RECHAZADO: turno de ' + room.currentTurnPlayerId + '.');
             return;
         }
-
         if (room && room.activeTurnTimeout) {
             clearTimeout(room.activeTurnTimeout);
             room.activeTurnTimeout = null;
-            console.log(`[TIMER V8.1] Timer cancelado para ${playerId}: el jugador lanzó los dados.`);
         }
 
         const d1 = Math.floor(Math.random() * 6) + 1;
         const d2 = Math.floor(Math.random() * 6) + 1;
 
-        // [v8.1.0] Rastrear dobles consecutivos por jugador
         if (room) {
             if (!room.consecutiveDoubles) room.consecutiveDoubles = {};
             if (d1 === d2) {
                 room.consecutiveDoubles[playerId] = (room.consecutiveDoubles[playerId] || 0) + 1;
-                console.log(`[DOBLES V8.1] ${playerId} lleva ${room.consecutiveDoubles[playerId]} dobles consecutivos.`);
+                console.log('[DOBLES V8.2] ' + playerId + ' lleva ' + room.consecutiveDoubles[playerId] + ' dobles consecutivos.');
             } else {
                 room.consecutiveDoubles[playerId] = 0;
             }
         }
-        
+
         io.in(roomId).emit('event_dice_result', {
             playerId: playerId,
             diceRoll1: d1,
@@ -415,251 +407,272 @@ io.on('connection', (socket) => {
         });
     });
 
-    // === [v8.1.0] INTENT_MOVE_TOKEN — MOTOR AUTORITATIVO DE CAPTURAS ===
-    socket.on('intent_move_token', (payload) => {
-        const { roomId, playerId, tokenId, newPathIndex, isBotMove } = payload;
+    // === [v8.2.0] INTENT_MOVE_TOKEN — MOTOR AUTORITATIVO ===
+    socket.on('intent_move_token', function(payload) {
+        const roomId = payload.roomId;
+        const playerId = payload.playerId;
+        const tokenId = payload.tokenId;
+        const newPathIndex = payload.newPathIndex;
+        const isBotMove = payload.isBotMove;
         const room = rooms[roomId];
 
-        // Emitir el movimiento de la ficha activa a todos los clientes
+        // [FIX #2] Ignorar si partida terminada
+        if (room && room.gameOver) {
+            return;
+        }
+
+        // =====================================================================
+        // [FIX #4] PENALIZACION POR 3 DOBLES — EVALUACION ANTICIPADA
+        // Antes de emitir el movimiento real, verificar si hay penalizacion.
+        // Si hay 3 dobles, solo emitir evento de penalizacion (ir a base).
+        // La ficha nunca llega a la casilla real en los clientes.
+        // =====================================================================
+        if (room && room.tokenState && room.consecutiveDoubles && room.consecutiveDoubles[playerId] >= 3) {
+            const movingSlot = room.players.findIndex(function(p) { return p.playerId === playerId; });
+            if (movingSlot >= 0 && movingSlot < room.tokenState.length) {
+                console.log('[PENALIZACION V8.2] ' + playerId + ' tiene 3 dobles. Ficha ' + tokenId + ' va directo a base (casilla ' + newPathIndex + ' nunca se muestra).');
+
+                room.tokenState[movingSlot][tokenId] = -1;
+                room.consecutiveDoubles[playerId] = 0;
+
+                // Solo emitir evento de penalizacion — NO el movimiento real
+                io.in(roomId).emit('event_token_moved', {
+                    playerId: playerId,
+                    tokenId: tokenId,
+                    newPathIndex: -1,
+                    isBotMove: isBotMove || false,
+                    isPenalty: true
+                });
+
+                // [FIX #1] Marcar flag para que intent_end_turn ignore el duplicado
+                room.penaltyJustApplied = true;
+
+                // Ceder turno al rival automaticamente
+                const nextSlot = (movingSlot + 1) % room.players.length;
+                const nextNetworkId = room.players[nextSlot].playerId;
+                console.log('[PENALIZACION V8.2] Turno cedido a ' + nextNetworkId + '.');
+
+                if (!room.movedThisTurn) room.movedThisTurn = {};
+                room.movedThisTurn[playerId] = false;
+
+                scheduleNextTurn(roomId, nextNetworkId);
+                return; // Early return — no procesar el movimiento real
+            }
+        }
+        // =====================================================================
+        // FIN FIX #4
+        // =====================================================================
+
+        // Emitir el movimiento normal
         io.in(roomId).emit('event_token_moved', {
-            playerId,
-            tokenId,
-            newPathIndex,
+            playerId: playerId,
+            tokenId: tokenId,
+            newPathIndex: newPathIndex,
             isBotMove: isBotMove || false
         });
 
-        // [v8.1.0] Actualizar el estado de fichas del servidor
+        // Actualizar tokenState del servidor
         if (room && room.tokenState) {
-            const movingSlot = room.players.findIndex(p => p.playerId === playerId);
-            
-            if (movingSlot >= 0 && movingSlot < room.tokenState.length) {
-                // Actualizar posición de la ficha que se movió
-                room.tokenState[movingSlot][tokenId] = newPathIndex;
-                console.log(`[CAPTURAS V8.1] Ficha ${tokenId} de slot ${movingSlot} movida a step ${newPathIndex}.`);
+            const movingSlot = room.players.findIndex(function(p) { return p.playerId === playerId; });
 
-                // === EVALUACIÓN DE CAPTURA ===
-                // Solo evaluar si el step es una casilla de perímetro normal (step 1..51)
+            if (movingSlot >= 0 && movingSlot < room.tokenState.length) {
+                room.tokenState[movingSlot][tokenId] = newPathIndex;
+
+                // [FIX #3] Marcar que este jugador movio una ficha en este turno
+                if (!room.movedThisTurn) room.movedThisTurn = {};
+                room.movedThisTurn[playerId] = true;
+
+                // [FIX #2] Verificar si el jugador llego a la meta
+                if (newPathIndex >= 57) {
+                    const winner = checkWinner(room);
+                    if (winner) {
+                        console.log('[GANADOR V8.2] Partida terminada! Ganador: ' + winner + ' en sala ' + roomId + '.');
+                        room.gameOver = true;
+                        if (room.activeTurnTimeout) {
+                            clearTimeout(room.activeTurnTimeout);
+                            room.activeTurnTimeout = null;
+                        }
+                        io.in(roomId).emit('event_game_over', { winnerId: winner, roomId: roomId });
+                        return;
+                    }
+                }
+
+                // === EVALUACION DE CAPTURA (periodmetro normal 1..51) ===
                 if (newPathIndex >= 1 && newPathIndex <= 51) {
                     const landingPIndex = getPerimeterIndex(movingSlot, newPathIndex);
-                    
-                    // Verificar si la casilla de destino es segura
+
                     if (!isSafeCell(landingPIndex)) {
-                        // Buscar fichas enemigas en la misma casilla
                         for (let enemySlot = 0; enemySlot < room.tokenState.length; enemySlot++) {
-                            if (enemySlot === movingSlot) continue; // saltar al propio jugador
-                            
+                            if (enemySlot === movingSlot) continue;
                             const enemyTokens = room.tokenState[enemySlot];
                             for (let enemyTokenId = 0; enemyTokenId < enemyTokens.length; enemyTokenId++) {
                                 const enemyStep = enemyTokens[enemyTokenId];
-                                
-                                // La ficha enemiga debe estar en el perímetro (1..51)
                                 if (enemyStep < 1 || enemyStep > 51) continue;
-                                
                                 const enemyPIndex = getPerimeterIndex(enemySlot, enemyStep);
-                                
                                 if (enemyPIndex === landingPIndex) {
-                                    // ¡CAPTURA! La ficha enemiga regresa a su base
                                     const enemyPlayerId = room.players[enemySlot].playerId;
-                                    console.log(`[CAPTURAS V8.1] ¡CAPTURA! Slot ${movingSlot} captura a slot ${enemySlot}, ficha ${enemyTokenId} (step ${enemyStep}, pIndex ${enemyPIndex}).`);
-                                    
-                                    // Actualizar el estado del servidor: la ficha enemiga regresa a base (-1)
+                                    console.log('[CAPTURAS V8.2] CAPTURA! Slot ' + movingSlot + ' captura slot ' + enemySlot + ' ficha ' + enemyTokenId + '.');
                                     room.tokenState[enemySlot][enemyTokenId] = -1;
-                                    
-                                    // Emitir el evento de captura a todos los clientes
-                                    // newPathIndex: -1 es la señal de "regresa a la base"
                                     io.in(roomId).emit('event_token_moved', {
                                         playerId: enemyPlayerId,
                                         tokenId: enemyTokenId,
                                         newPathIndex: -1,
                                         isBotMove: false,
-                                        isCapture: true // campo informativo
+                                        isCapture: true
                                     });
                                 }
                             }
                         }
                     } else {
-                        console.log(`[CAPTURAS V8.1] Casilla pIndex ${landingPIndex} es SEGURA — no hay captura.`);
+                        console.log('[CAPTURAS V8.2] Casilla pIndex ' + landingPIndex + ' es SEGURA.');
                     }
                 }
-                // === FIN EVALUACIÓN DE CAPTURA ===
-
-                // === PENALIZACIÓN POR 3 DOBLES CONSECUTIVOS ===
-                // Si el jugador tiene 3 dobles, la ficha que acaba de mover regresa a la base.
-                // El cliente también lo detecta, pero el servidor es la autoridad.
-                if (room.consecutiveDoubles && room.consecutiveDoubles[playerId] >= 3) {
-                    console.log(`[PENALIZACIÓN V8.1] ${playerId} obtuvo 3 dobles consecutivos. Ficha ${tokenId} regresa a base.`);
-                    room.tokenState[movingSlot][tokenId] = -1;
-                    room.consecutiveDoubles[playerId] = 0;
-                    
-                    // Emitir penalización: la ficha del propio jugador regresa a casa
-                    io.in(roomId).emit('event_token_moved', {
-                        playerId: playerId,
-                        tokenId: tokenId,
-                        newPathIndex: -1,
-                        isBotMove: false,
-                        isPenalty: true
-                    });
-                }
             }
-        } else {
-            // Sala sin tokenState inicializado (reconexión tardía o sala antigua).
-            // No hacer nada adicional, el relay ya se emitió.
-            console.log(`[CAPTURAS V8.1] Sala ${roomId} sin tokenState. Captura omitida (modo relay).`);
         }
     });
 
-    // === [v8.0.10] INTENT_END_TURN — ORQUESTACIÓN CON DELAY AUTORITATIVO ===
-    socket.on('intent_end_turn', (payload) => {
-        const { roomId, nextPlayerId, nextTurnId } = payload;
-        
-        const colorIdToSlotIndex = {
-            0: 0,
-            2: 1,
-            1: 2,
-            3: 3,
-            4: 4,
-            5: 5
-        };
+    // === [v8.2.0] INTENT_END_TURN — FIXES #1, #2, #3 ===
+    socket.on('intent_end_turn', function(payload) {
+        const roomId = payload.roomId;
+        const nextPlayerId = payload.nextPlayerId;
+        const nextTurnId = payload.nextTurnId;
+        const room = rooms[roomId];
 
+        // [FIX #2] Ignorar si partida terminada
+        if (room && room.gameOver) {
+            console.log('[GUARD V8.2] intent_end_turn IGNORADO: partida terminada en sala ' + roomId + '.');
+            return;
+        }
+
+        // [FIX #1] Si la penalizacion ya programo el siguiente turno, ignorar este end_turn duplicado
+        if (room && room.penaltyJustApplied) {
+            console.log('[GUARD V8.2] intent_end_turn IGNORADO: turno ya cedido por penalizacion en sala ' + roomId + '.');
+            room.penaltyJustApplied = false;
+            return;
+        }
+
+        const colorIdToSlotIndex = { 0: 0, 2: 1, 1: 2, 3: 3, 4: 4, 5: 5 };
         const parsedColorId = parseInt(nextPlayerId !== undefined ? nextPlayerId : nextTurnId, 10);
         let targetSlot = colorIdToSlotIndex[parsedColorId];
-        
         if (targetSlot === undefined) targetSlot = 0;
 
-        const room = rooms[roomId];
         let nextNetworkId = String(parsedColorId);
-
         if (room && room.players && room.players[targetSlot]) {
             nextNetworkId = room.players[targetSlot].playerId;
         }
 
-        // [v8.1.0] Reiniciar dobles consecutivos al cambiar de turno (a otro jugador)
+        // =====================================================================
+        // [FIX #3] TURNO EXTRA SOLO SI SE MOVIO UNA FICHA
+        // El cliente pide turno extra cuando nextNetworkId === currentTurnPlayerId.
+        // El servidor verifica movedThisTurn. Si es false (no movio), cancela el
+        // turno extra y pasa al rival. Alineado con motor offline.
+        // =====================================================================
+        if (room && room.currentTurnPlayerId && nextNetworkId === room.currentTurnPlayerId) {
+            if (!room.movedThisTurn || !room.movedThisTurn[room.currentTurnPlayerId]) {
+                const currentSlot = room.players.findIndex(function(p) { return p.playerId === room.currentTurnPlayerId; });
+                const rivalSlot = (currentSlot + 1) % room.players.length;
+                nextNetworkId = room.players[rivalSlot].playerId;
+                console.log('[FIX#3 V8.2] Turno extra CANCELADO para ' + room.currentTurnPlayerId + ': no movio fichas. Cedido a ' + nextNetworkId + '.');
+            } else {
+                console.log('[FIX#3 V8.2] Turno extra CONCEDIDO a ' + nextNetworkId + ': movio fichas con dobles.');
+            }
+        }
+        // =====================================================================
+
+        // Reiniciar dobles consecutivos al cambiar de turno
         if (room && room.currentTurnPlayerId && room.currentTurnPlayerId !== nextNetworkId) {
             if (room.consecutiveDoubles) {
                 room.consecutiveDoubles[room.currentTurnPlayerId] = 0;
             }
         }
 
-        // V21.5 Autoritativo: Decrementar gracia al jugador que acaba de terminar su turno
+        // Decrementar gracia (modo bot)
         if (room && room.players && room.currentTurnSlot !== undefined) {
             const prevPlayer = room.players[room.currentTurnSlot];
             if (prevPlayer && prevPlayer.isConnected === false && prevPlayer._graceTurnsLeft !== undefined) {
                 prevPlayer._graceTurnsLeft -= 1;
-                console.log(`[GRACIA V21.5] Jugador ${prevPlayer.playerId} consumió 1 turno bot. Restantes: ${prevPlayer._graceTurnsLeft}`);
-                
                 if (prevPlayer._graceTurnsLeft <= 0) {
-                    console.log(`[VERDUGO V21.5] Jugador ${prevPlayer.playerId} agotó su gracia. EXPULSADO.`);
-                    
                     io.in(roomId).emit('event_player_expelled', { playerId: prevPlayer.playerId });
-                    
                     prevPlayer.isExpelled = true;
                     prevPlayer.isBot = false;
-                    
-                    const activeHumans = room.players.filter(p => !p.isBot && p.isConnected && !p.isExpelled);
+                    const activeHumans = room.players.filter(function(p) { return !p.isBot && p.isConnected && !p.isExpelled; });
                     if (activeHumans.length <= 1) {
                         const winner = activeHumans[0];
-                        room.lastWinnerId = winner ? winner.playerId : '';
-                        io.in(roomId).emit('event_game_over_by_abandonment', {
-                            winnerId: winner ? winner.playerId : ""
-                        });
+                        room.gameOver = true;
+                        io.in(roomId).emit('event_game_over_by_abandonment', { winnerId: winner ? winner.playerId : '' });
+                        return;
                     }
                 }
             }
         }
 
+        const finalTargetSlot = room && room.players
+            ? room.players.findIndex(function(p) { return p.playerId === nextNetworkId; })
+            : targetSlot;
         if (room) {
-            room.currentTurnSlot = targetSlot;
+            room.currentTurnSlot = finalTargetSlot >= 0 ? finalTargetSlot : targetSlot;
         }
 
         scheduleNextTurn(roomId, nextNetworkId);
     });
 
-    socket.on('intent_chat', (payload) => {
-        const { roomId, playerId, playerName, message } = payload;
-        io.in(roomId).emit('event_chat', {
-            playerId,
-            playerName,
-            message
-        });
+    socket.on('intent_chat', function(payload) {
+        io.in(payload.roomId).emit('event_chat', { playerId: payload.playerId, playerName: payload.playerName, message: payload.message });
     });
 
-    socket.on('host_sync_state', (payload) => {
-        const { roomId, targetPlayerId, gameState } = payload;
-        const room = rooms[roomId];
+    socket.on('host_sync_state', function(payload) {
+        const room = rooms[payload.roomId];
         if (room && room.players) {
-            const targetPlayer = room.players.find(p => p.playerId === targetPlayerId);
+            const targetPlayer = room.players.find(function(p) { return p.playerId === payload.targetPlayerId; });
             if (targetPlayer && targetPlayer.socketId) {
-                io.to(targetPlayer.socketId).emit('event_state_resynced', gameState);
-                console.log(`[SYNC] Estado de juego enviado del Host al jugador reconectado: ${targetPlayerId}`);
+                io.to(targetPlayer.socketId).emit('event_state_resynced', payload.gameState);
             }
         }
     });
 
-    // === [v8.1.0] RESINCRONIZACIÓN DE ESTADO DE FICHAS ===
-    // El cliente HOST puede sincronizar el tokenState del servidor tras una reconexión.
-    socket.on('sync_token_state', (payload) => {
-        const { roomId, tokenStates } = payload;
-        const room = rooms[roomId];
+    socket.on('sync_token_state', function(payload) {
+        const room = rooms[payload.roomId];
         if (!room) return;
-        
-        // tokenStates es un array de { playerId, tokenId, step }
-        if (Array.isArray(tokenStates)) {
-            if (!room.tokenState) {
-                room.tokenState = initTokenState(room.players.length);
-            }
-            tokenStates.forEach(({ playerId, tokenId, step }) => {
-                const slotIdx = room.players.findIndex(p => p.playerId === playerId);
+        if (Array.isArray(payload.tokenStates)) {
+            if (!room.tokenState) room.tokenState = initTokenState(room.players.length);
+            payload.tokenStates.forEach(function(item) {
+                const slotIdx = room.players.findIndex(function(p) { return p.playerId === item.playerId; });
                 if (slotIdx >= 0 && room.tokenState[slotIdx]) {
-                    room.tokenState[slotIdx][tokenId] = step;
+                    room.tokenState[slotIdx][item.tokenId] = item.step;
                 }
             });
-            console.log(`[SYNC V8.1] tokenState resincronizado para sala ${roomId}.`);
         }
     });
 
-    // === [v8.0.10] DISCONNECT — CON LIMPIEZA DE TIMER AUTORITATIVO ===
-    socket.on('disconnect', () => {
-        console.log(`[WS] Socket desconectado: ${socket.id}`);
+    socket.on('disconnect', function() {
         if (socket.roomId && socket.playerId) {
             const roomId = socket.roomId;
             const playerId = socket.playerId;
             const room = rooms[roomId];
-            
+
             if (room && room.players) {
-                const player = room.players.find(p => p.playerId === playerId);
+                const player = room.players.find(function(p) { return p.playerId === playerId; });
                 if (player) {
                     player.isConnected = false;
-                    
+
                     if (room.currentTurnPlayerId === playerId && room.activeTurnTimeout) {
                         clearTimeout(room.activeTurnTimeout);
                         room.activeTurnTimeout = null;
-                        console.log(`[TIMER V8.1] Timer de turno cancelado: jugador activo ${playerId} se desconectó.`);
                     }
-                    
-                    if (room.gameStarted) {
+
+                    if (room.gameStarted && !room.gameOver) {
                         player.isBot = true;
                         const graceTurns = room.targetPlayers === 2 ? 5 : 2;
                         player._graceTurnsLeft = graceTurns;
-                        console.log(`[GRACIA V21.9] Jugador ${playerId} desconectado. Sala ${room.targetPlayers}p = Bot con ${graceTurns} turnos de gracia.`);
                     }
-                    
-                    io.in(roomId).emit('room_updated', {
-                        id: roomId,
-                        players: room.players,
-                        targetPlayers: room.targetPlayers
-                    });
-                    
-                    io.in(roomId).emit('event_player_disconnected', {
-                        playerId: playerId
-                    });
 
-                    const allDisconnected = room.players.every(p => p.isConnected === false);
+                    io.in(roomId).emit('room_updated', { id: roomId, players: room.players, targetPlayers: room.targetPlayers });
+                    io.in(roomId).emit('event_player_disconnected', { playerId: playerId });
+
+                    const allDisconnected = room.players.every(function(p) { return p.isConnected === false; });
                     if (allDisconnected) {
-                        if (room.activeTurnTimeout) {
-                            clearTimeout(room.activeTurnTimeout);
-                        }
+                        if (room.activeTurnTimeout) clearTimeout(room.activeTurnTimeout);
                         delete rooms[roomId];
-                        console.log(`[LIMPIEZA] Sala ${roomId} eliminada. Todos los jugadores están offline.`);
                     }
                 }
             }
@@ -668,6 +681,6 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`[SERVER] Sweety Ludo WebSocket Server V8.1.0 — Motor Autoritativo Capturas + Timing Optimizado en puerto ${PORT}`);
+server.listen(PORT, function() {
+    console.log('[SERVER] Sweety Ludo V8.2.0 — QA Forensic Fixes (FIX#1 double-turn, FIX#2 game-over, FIX#3 extra-turn, FIX#4 penalty-anim) en puerto ' + PORT);
 });
