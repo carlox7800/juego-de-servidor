@@ -1,5 +1,5 @@
-// === Sweety Ludo Server V24.0 — Motor Autoritativo v8.2.2 ===
-// === CHANGELOG v8.2.2 (QA ADJUSTMENTS: 500ms turn transition, 100% reliable extra turns on doubles, uncombined bonus steps) ===
+// === Sweety Ludo Server V24.0 — Motor Autoritativo v8.2.3 ===
+// === CHANGELOG v8.2.3 (Restauracion de sumatoria universal de movimientos) ===
 // ===
 // === [FIX #1] DOBLE event_turn_started despues de penalizacion por 3 dobles.
 // ===          RAIZ: El bloque de penalizacion en intent_move_token no cancelaba el
@@ -184,7 +184,7 @@ function scheduleNextTurn(roomId, nextNetworkId) {
 }
 
 app.get('/', function(req, res) {
-    res.send('Sweety Ludo V8.2.2 Motor AAA — QA Adjustments: Fast 500ms transition, 100% Reliable Doubles, Uncombined Bonus Steps.');
+    res.send('Sweety Ludo V8.2.3 Motor AAA — Restauracion de sumatoria universal de movimientos.');
 });
 
 io.on('connection', function(socket) {
@@ -689,5 +689,5 @@ io.on('connection', function(socket) {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, function() {
-    console.log('[SERVER] Sweety Ludo V8.2.2 — QA Adjustments (500ms delay, 100% Reliable Doubles) en puerto ' + PORT);
+    console.log('[SERVER] Sweety Ludo V8.2.3 — Sumatoria universal activa en puerto ' + PORT);
 });
