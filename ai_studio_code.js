@@ -1,5 +1,5 @@
-// === Sweety Ludo Server V24.0 — Motor Autoritativo v8.2.0 ===
-// === CHANGELOG v8.2.0 (FORENSIC QA FIXES — basados en logs de partida en vivo):
+// === Sweety Ludo Server V24.0 — Motor Autoritativo v8.2.1 ===
+// === CHANGELOG v8.2.1 (MARCA DE DESPLIEGUE OFICIAL Y VERIFICACION EN VIVO) ===
 // ===
 // === [FIX #1] DOBLE event_turn_started despues de penalizacion por 3 dobles.
 // ===          RAIZ: El bloque de penalizacion en intent_move_token no cancelaba el
@@ -184,7 +184,7 @@ function scheduleNextTurn(roomId, nextNetworkId) {
 }
 
 app.get('/', function(req, res) {
-    res.send('Sweety Ludo V8.2.0 Motor AAA — QA Forensic Fixes: double-turn, game-over, extra-turn, penalty-anim.');
+    res.send('Sweety Ludo V8.2.1 Motor AAA — Marca de Despliegue Oficial y Verificación en Vivo.');
 });
 
 io.on('connection', function(socket) {
@@ -698,5 +698,5 @@ io.on('connection', function(socket) {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, function() {
-    console.log('[SERVER] Sweety Ludo V8.2.0 — QA Forensic Fixes (FIX#1 double-turn, FIX#2 game-over, FIX#3 extra-turn, FIX#4 penalty-anim) en puerto ' + PORT);
+    console.log('[SERVER] Sweety Ludo V8.2.1 — Marca de Despliegue Oficial y Verificación en Vivo en puerto ' + PORT);
 });
