@@ -1,4 +1,4 @@
-// === Sweety Ludo Server v8.2.9 (Fix Deducción Inteligente de Bonos Combinados) ===
+// === Sweety Ludo Server v8.3.0 (3er Doble Pausa Dramática + Veto de Turno Extra) ===
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -451,7 +451,6 @@ io.on('connection', (socket) => {
         const d2 = Math.floor(Math.random() * 6) + 1;
         
         const room = rooms[roomId];
-        let isThreeDoublesPenalty = false;
 
         if (room && room.consecutiveDoublesMap) {
             if (d1 === d2) {
@@ -459,9 +458,8 @@ io.on('connection', (socket) => {
                 console.log(`[AUTORITATIVO QA] 🎲 Jugador ${playerId} en Sala ${roomId} obtuvo DOBLES [${d1}, ${d2}]. Consecutivos: ${room.consecutiveDoublesMap[playerId]}`);
                 
                 if (room.consecutiveDoublesMap[playerId] >= 3) {
-                    isThreeDoublesPenalty = true;
                     room.consecutiveDoublesMap[playerId] = 0;
-                    console.log(`[AUTORITATIVO FASE 3] 🚫 ¡3er DOBLE ALCANZADO! Ejecutando castigo autoritativo para Jugador ${playerId}.`);
+                    console.log(`[AUTORITATIVO FASE 3] 🚫 ¡3er DOBLE ALCANZADO! Programando castigo autoritativo con pausa dramática para Jugador ${playerId}.`);
                     
                     const lastTokenId = room.lastMovedTokenMap ? room.lastMovedTokenMap[playerId] : null;
                     if (lastTokenId !== null && lastTokenId !== undefined && room.tokens) {
@@ -471,16 +469,21 @@ io.on('connection', (socket) => {
                         const tokenToPenalize = room.tokens.find(t => (t.networkPlayerId === playerId || t.playerId === targetPlayerIdx) && t.id === lastTokenId && t.step > 0);
                         if (tokenToPenalize) {
                             tokenToPenalize.step = -1;
-                            console.log(`[AUTORITATIVO FASE 3] 🏠 Ficha ${lastTokenId} del Jugador ${playerId} castigada y enviada a la base (step = -1).`);
                             
-                            // Emitir orden autoritativa de retorno a casa con bandera de penalización
-                            io.in(roomId).emit('event_token_moved', {
-                                playerId: playerId,
-                                tokenId: lastTokenId,
-                                newPathIndex: -1,
-                                isBotMove: false,
-                                isPenalty: true
-                            });
+                            if (!room.forceNextTurnAfterPenaltyMap) room.forceNextTurnAfterPenaltyMap = {};
+                            room.forceNextTurnAfterPenaltyMap[playerId] = true;
+
+                            // V8.3.0: Retrasar el envío de la penalización visual para permitir que la animación de dados (500ms) finalice en el cliente
+                            setTimeout(() => {
+                                console.log(`[AUTORITATIVO FASE 3] 🏠 Ficha ${lastTokenId} del Jugador ${playerId} castigada y enviada a la base (step = -1). Emitiendo event_token_moved.`);
+                                io.in(roomId).emit('event_token_moved', {
+                                    playerId: playerId,
+                                    tokenId: lastTokenId,
+                                    newPathIndex: -1,
+                                    isBotMove: false,
+                                    isPenalty: true
+                                });
+                            }, 1200);
                         }
                     }
                 }
@@ -490,6 +493,7 @@ io.on('connection', (socket) => {
             }
         }
 
+        // V8.3.0: Emitir primero los dados para que el cliente muestre el 3er doble girando y cayendo
         io.in(roomId).emit('event_dice_result', {
             playerId: playerId,
             diceRoll1: d1,
@@ -502,6 +506,13 @@ io.on('connection', (socket) => {
         const { roomId, playerId, tokenId, newPathIndex, isBotMove } = payload;
 
         const room = rooms[roomId];
+
+        // V8.3.0: Veto de movimientos si el jugador acaba de sufrir penalización por 3 dobles
+        if (room && room.forceNextTurnAfterPenaltyMap && room.forceNextTurnAfterPenaltyMap[playerId]) {
+            console.log(`[AUTORITATIVO v8.3.0] 🚫 Veto de movimiento: Jugador ${playerId} intentó mover durante la secuencia de penalización por 3 dobles.`);
+            return;
+        }
+
         let capturedToEmit = [];
 
         if (room && room.tokens) {
@@ -560,7 +571,7 @@ io.on('connection', (socket) => {
                     if (bonusSteps > 0) {
                         if (!room.pendingBonusMap) room.pendingBonusMap = {};
                         room.pendingBonusMap[playerId] = (room.pendingBonusMap[playerId] || 0) + bonusSteps;
-                        console.log(`[AUTORITATIVO QA v8.2.9] 🎁 Bonificación de +${bonusSteps} pasos registrada en backend para Jugador ${playerId}. Total acumulado: ${room.pendingBonusMap[playerId]}`);
+                        console.log(`[AUTORITATIVO QA v8.2.7] 🎁 Bonificación de +${bonusSteps} pasos registrada en backend para Jugador ${playerId}. Total acumulado: ${room.pendingBonusMap[playerId]}`);
                     }
                 }
             }
@@ -596,32 +607,56 @@ io.on('connection', (socket) => {
         
         const room = rooms[roomId];
 
-        // V24.0 / QA v8.2.7: Retención autoritativa de turno por bonificación de captura pendiente
+        let activePlayerId = null;
         if (room && room.players && room.currentTurnSlot !== undefined) {
             const activePlayer = room.players[room.currentTurnSlot];
-            const activePlayerId = activePlayer ? activePlayer.playerId : null;
-
-            if (activePlayerId && room.pendingBonusMap && room.pendingBonusMap[activePlayerId] > 0) {
-                const bonusToAward = room.pendingBonusMap[activePlayerId];
-                room.pendingBonusMap[activePlayerId] = 0; // Consumir y limpiar el bono completamente
-
-                console.log(`[AUTORITATIVO QA v8.2.7] 🛑 VETO DE FIN DE TURNO: Jugador ${activePlayerId} (Slot ${room.currentTurnSlot}) intentó pasar el turno, pero tiene +${bonusToAward} pasos de captura pendientes. Reemitiendo evento de dados...`);
-
-                io.in(roomId).emit('event_dice_result', {
-                    playerId: activePlayerId,
-                    diceRoll1: 0,
-                    diceRoll2: 0,
-                    diceValues: [bonusToAward]
-                });
-
-                return; // ABORTAR EL CAMBIO DE TURNO: No se actualiza currentTurnSlot ni se emite event_turn_started
-            }
+            activePlayerId = activePlayer ? activePlayer.playerId : null;
         }
 
-        let nextNetworkId;
+        // V24.0 / QA v8.2.7: Retención autoritativa de turno por bonificación de captura pendiente
+        if (activePlayerId && room.pendingBonusMap && room.pendingBonusMap[activePlayerId] > 0) {
+            const bonusToAward = room.pendingBonusMap[activePlayerId];
+            room.pendingBonusMap[activePlayerId] = 0; // Consumir y limpiar el bono completamente
+
+            console.log(`[AUTORITATIVO QA v8.2.7] 🛑 VETO DE FIN DE TURNO: Jugador ${activePlayerId} (Slot ${room.currentTurnSlot}) intentó pasar el turno, pero tiene +${bonusToAward} pasos de captura pendientes. Reemitiendo evento de dados...`);
+
+            io.in(roomId).emit('event_dice_result', {
+                playerId: activePlayerId,
+                diceRoll1: 0,
+                diceRoll2: 0,
+                diceValues: [bonusToAward]
+            });
+
+            return; // ABORTAR EL CAMBIO DE TURNO: No se actualiza currentTurnSlot ni se emite event_turn_started
+        }
+
+        let nextNetworkId = explicitNetworkId;
         let targetSlot = 0;
 
-        if (explicitNetworkId) {
+        // V8.3.0: Override for 3rd double penalty turn end
+        if (activePlayerId && room.forceNextTurnAfterPenaltyMap && room.forceNextTurnAfterPenaltyMap[activePlayerId]) {
+            room.forceNextTurnAfterPenaltyMap[activePlayerId] = false;
+            console.log(`[AUTORITATIVO v8.3.0] 🚫 Veto de Turno Extra: Jugador ${activePlayerId} intentó retener turno tras 3er doble. Forzando avance.`);
+
+            const isHex = (room.targetPlayers || room.players.length) > 4;
+            const goalStep = getGoalStep(isHex);
+            const totalSlots = room.players.length;
+
+            let currentIdx = room.currentTurnSlot !== undefined ? room.currentTurnSlot : 0;
+            let nextIdx = (currentIdx + 1) % totalSlots;
+            let loops = 0;
+
+            while (loops < totalSlots) {
+                const playerTokens = room.tokens ? room.tokens.filter(t => t.playerId === nextIdx) : [];
+                const isFinished = playerTokens.length > 0 && playerTokens.every(t => t.step === goalStep);
+                if (!isFinished) break;
+                nextIdx = (nextIdx + 1) % totalSlots;
+                loops++;
+            }
+
+            targetSlot = nextIdx;
+            nextNetworkId = room.players[targetSlot] ? room.players[targetSlot].playerId : String(targetSlot);
+        } else if (explicitNetworkId) {
             // V24.0 (NUEVO LUDO WEB): By-pass directo por UUID. 
             // No hay traducciones cruzadas ni diccionarios rígidos.
             nextNetworkId = explicitNetworkId;
