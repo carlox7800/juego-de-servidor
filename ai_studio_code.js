@@ -1,4 +1,4 @@
-// === Sweety Ludo Server v8.2.6 (Veto y Retención Autoritativa de Bonificación por Captura) ===
+// === Sweety Ludo Server v8.2.7 (Fix Turno 15s + Deducción Autoritativa de Bonificación) ===
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -294,7 +294,8 @@ io.on('connection', (socket) => {
             const firstPlayer = room.players[0].playerId;
             io.in(foundRoomId).emit('event_turn_started', {
                 playerId: firstPlayer,
-                activePlayerId: firstPlayer
+                activePlayerId: firstPlayer,
+                turnDurationSeconds: 15
             });
         }
     });
@@ -399,7 +400,8 @@ io.on('connection', (socket) => {
                 const firstPlayer = room.players[0].playerId;
                 io.in(cleanRoomCode).emit('event_turn_started', {
                     playerId: firstPlayer,
-                    activePlayerId: firstPlayer
+                    activePlayerId: firstPlayer,
+                    turnDurationSeconds: 15
                 });
             }, 3500);
         }
@@ -519,6 +521,15 @@ io.on('connection', (socket) => {
                 token.step = newPathIndex;
                 room.lastMovedTokenMap[playerId] = tokenId;
 
+                // V24.0 / QA v8.2.7: Deducción de bonos consumidos localmente por el cliente
+                if (typeof newPathIndex === 'number' && typeof oldStep === 'number') {
+                    const distanceMoved = newPathIndex - oldStep;
+                    if (distanceMoved > 6 && room.pendingBonusMap && room.pendingBonusMap[playerId] >= distanceMoved) {
+                        room.pendingBonusMap[playerId] -= distanceMoved;
+                        console.log(`[AUTORITATIVO QA v8.2.7] 🎯 Jugador ${playerId} consumió localmente ${distanceMoved} pasos de bono. Restantes: ${room.pendingBonusMap[playerId]}`);
+                    }
+                }
+
                 const colorName = (isHex ? HEX_COLORS_ORDER : SQUARE_COLORS_ORDER)[targetPlayerIdx] || 'yellow';
                 const cellDesc = getCellIndexForToken(colorName, newPathIndex, isHex);
 
@@ -537,7 +548,7 @@ io.on('connection', (socket) => {
                     if (bonusSteps > 0) {
                         if (!room.pendingBonusMap) room.pendingBonusMap = {};
                         room.pendingBonusMap[playerId] = (room.pendingBonusMap[playerId] || 0) + bonusSteps;
-                        console.log(`[AUTORITATIVO QA v8.2.6] 🎁 Bonificación de +${bonusSteps} pasos registrada en backend para Jugador ${playerId}. Total acumulado: ${room.pendingBonusMap[playerId]}`);
+                        console.log(`[AUTORITATIVO QA v8.2.7] 🎁 Bonificación de +${bonusSteps} pasos registrada en backend para Jugador ${playerId}. Total acumulado: ${room.pendingBonusMap[playerId]}`);
                     }
                 }
             }
@@ -573,20 +584,20 @@ io.on('connection', (socket) => {
         
         const room = rooms[roomId];
 
-        // V24.0 / QA v8.2.6: Retención autoritativa de turno por bonificación de captura pendiente
+        // V24.0 / QA v8.2.7: Retención autoritativa de turno por bonificación de captura pendiente
         if (room && room.players && room.currentTurnSlot !== undefined) {
             const activePlayer = room.players[room.currentTurnSlot];
             const activePlayerId = activePlayer ? activePlayer.playerId : null;
 
             if (activePlayerId && room.pendingBonusMap && room.pendingBonusMap[activePlayerId] > 0) {
                 const bonusToAward = room.pendingBonusMap[activePlayerId];
-                room.pendingBonusMap[activePlayerId] = 0; // Consumir el bono
+                room.pendingBonusMap[activePlayerId] = 0; // Consumir y limpiar el bono completamente
 
-                console.log(`[AUTORITATIVO QA v8.2.6] 🛑 VETO DE FIN DE TURNO: Jugador ${activePlayerId} (Slot ${room.currentTurnSlot}) intentó pasar el turno, pero tiene +${bonusToAward} pasos de captura pendientes. Reemitiendo evento de dados...`);
+                console.log(`[AUTORITATIVO QA v8.2.7] 🛑 VETO DE FIN DE TURNO: Jugador ${activePlayerId} (Slot ${room.currentTurnSlot}) intentó pasar el turno, pero tiene +${bonusToAward} pasos de captura pendientes. Reemitiendo evento de dados...`);
 
                 io.in(roomId).emit('event_dice_result', {
                     playerId: activePlayerId,
-                    diceRoll1: bonusToAward,
+                    diceRoll1: 0,
                     diceRoll2: 0,
                     diceValues: [bonusToAward]
                 });
@@ -662,7 +673,8 @@ io.on('connection', (socket) => {
 
         io.in(roomId).emit('event_turn_started', {
             playerId: nextNetworkId,
-            activePlayerId: nextNetworkId
+            activePlayerId: nextNetworkId,
+            turnDurationSeconds: 15
         });
     });
 
