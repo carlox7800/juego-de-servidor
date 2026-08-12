@@ -1,4 +1,4 @@
-// === Sweety Ludo Server v8.2.7 (Fix Turno 15s + Deducción Autoritativa de Bonificación) ===
+// === Sweety Ludo Server v8.2.8 (3 Dobles Visual Fix + Flag Autoritativo) ===
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -473,12 +473,13 @@ io.on('connection', (socket) => {
                             tokenToPenalize.step = -1;
                             console.log(`[AUTORITATIVO FASE 3] 🏠 Ficha ${lastTokenId} del Jugador ${playerId} castigada y enviada a la base (step = -1).`);
                             
-                            // Emitir orden autoritativa de retorno a casa
+                            // Emitir orden autoritativa de retorno a casa con bandera de penalización
                             io.in(roomId).emit('event_token_moved', {
                                 playerId: playerId,
                                 tokenId: lastTokenId,
                                 newPathIndex: -1,
-                                isBotMove: false
+                                isBotMove: false,
+                                isPenalty: true
                             });
                         }
                     }
