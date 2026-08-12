@@ -1,4 +1,4 @@
-// === Sweety Ludo Server v8.2.8 (3 Dobles Visual Fix + Flag Autoritativo) ===
+// === Sweety Ludo Server v8.2.9 (Fix Deducción Inteligente de Bonos Combinados) ===
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -490,13 +490,6 @@ io.on('connection', (socket) => {
             }
         }
 
-        // V8.0.6 FIX: Emit penalty BEFORE dice result so client processes capture
-        // THEN receives new dice state - prevents UI freeze from wrong event order
-        if (isThreeDoublesPenalty) {
-            // Re-check if token was penalized and emit it first
-            // (already emitted above inside the penalty block - this is the ordering guard)
-        }
-
         io.in(roomId).emit('event_dice_result', {
             playerId: playerId,
             diceRoll1: d1,
@@ -522,12 +515,30 @@ io.on('connection', (socket) => {
                 token.step = newPathIndex;
                 room.lastMovedTokenMap[playerId] = tokenId;
 
-                // V24.0 / QA v8.2.7: Deducción de bonos consumidos localmente por el cliente
+                // V8.2.9: Deducción inteligente de bonos combinados
                 if (typeof newPathIndex === 'number' && typeof oldStep === 'number') {
                     const distanceMoved = newPathIndex - oldStep;
-                    if (distanceMoved > 6 && room.pendingBonusMap && room.pendingBonusMap[playerId] >= distanceMoved) {
-                        room.pendingBonusMap[playerId] -= distanceMoved;
-                        console.log(`[AUTORITATIVO QA v8.2.7] 🎯 Jugador ${playerId} consumió localmente ${distanceMoved} pasos de bono. Restantes: ${room.pendingBonusMap[playerId]}`);
+                    if (distanceMoved > 0 && room.pendingBonusMap && room.pendingBonusMap[playerId] > 0) {
+                        let bonusToDeduct = 0;
+                        
+                        if (distanceMoved >= room.pendingBonusMap[playerId] && distanceMoved > 12) {
+                            // El movimiento es mayor o igual al bono pendiente y excede un tiro de dados doble (6+6=12).
+                            // Esto significa inequívocamente que consumió todo el bono pendiente (ej. tenía 20, movió 25).
+                            bonusToDeduct = room.pendingBonusMap[playerId];
+                        } else if (distanceMoved > 12) {
+                            // Casos donde el bono acumulado es mayor al que usó (ej. capturó 2 fichas y tiene +40, pero consumió 25)
+                            if (distanceMoved >= 25 && room.pendingBonusMap[playerId] >= 25 && isHex) bonusToDeduct = 25;
+                            else if (distanceMoved >= 20 && room.pendingBonusMap[playerId] >= 20) bonusToDeduct = 20;
+                            else if (distanceMoved >= 15 && room.pendingBonusMap[playerId] >= 15 && isHex) bonusToDeduct = 15;
+                            else if (distanceMoved >= 10 && room.pendingBonusMap[playerId] >= 10) bonusToDeduct = 10;
+                        } else if (distanceMoved === 10 || distanceMoved === 15 || distanceMoved === 20 || distanceMoved === 25) {
+                            if (room.pendingBonusMap[playerId] >= distanceMoved) bonusToDeduct = distanceMoved;
+                        }
+                        
+                        if (bonusToDeduct > 0) {
+                            room.pendingBonusMap[playerId] -= bonusToDeduct;
+                            console.log(`[AUTORITATIVO V8.2.9] 🎯 Jugador ${playerId} consumió ${bonusToDeduct} pasos de bono (Movimiento total: ${distanceMoved}). Restantes: ${room.pendingBonusMap[playerId]}`);
+                        }
                     }
                 }
 
@@ -549,7 +560,7 @@ io.on('connection', (socket) => {
                     if (bonusSteps > 0) {
                         if (!room.pendingBonusMap) room.pendingBonusMap = {};
                         room.pendingBonusMap[playerId] = (room.pendingBonusMap[playerId] || 0) + bonusSteps;
-                        console.log(`[AUTORITATIVO QA v8.2.7] 🎁 Bonificación de +${bonusSteps} pasos registrada en backend para Jugador ${playerId}. Total acumulado: ${room.pendingBonusMap[playerId]}`);
+                        console.log(`[AUTORITATIVO QA v8.2.9] 🎁 Bonificación de +${bonusSteps} pasos registrada en backend para Jugador ${playerId}. Total acumulado: ${room.pendingBonusMap[playerId]}`);
                     }
                 }
             }
