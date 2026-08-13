@@ -238,7 +238,8 @@ io.on('connection', (socket) => {
         
         let foundRoomId = null;
         for (const [roomId, room] of Object.entries(rooms)) {
-            if (!room.isPrivate && room.targetPlayers === targetPlayers && room.players.length < targetPlayers) {
+            // Aislamiento: Validar que el modo de la sala sea exactamente el mismo modo que solicita el jugador
+            if (!room.isPrivate && room.targetPlayers === targetPlayers && room.players.length < targetPlayers && room.mode === mode) {
                 foundRoomId = roomId;
                 break;
             }
@@ -249,6 +250,7 @@ io.on('connection', (socket) => {
             rooms[foundRoomId] = {
                 id: foundRoomId,
                 isPrivate: false,
+                mode: mode || 'online_training', // Guardar claramente qué tipo de modo es
                 players: [],
                 targetPlayers: targetPlayers || 2,
                 gameStarted: false
@@ -304,11 +306,12 @@ io.on('connection', (socket) => {
     });
 
     socket.on('create_private_room', (payload) => {
-        const { playerId, playerName, targetPlayers } = payload;
+        const { playerId, playerName, targetPlayers, mode } = payload;
         const roomId = generateUniqueRoomId();
         rooms[roomId] = {
             id: roomId,
             isPrivate: true,
+            mode: mode || 'online_training', // Guardar claramente qué tipo de modo es
             players: [{ 
                 playerId, 
                 playerName, 
