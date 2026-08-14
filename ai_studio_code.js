@@ -305,6 +305,92 @@ io.on('connection', (socket) => {
         }
     });
 
+    // === LIMPIEZA AUTORITATIVA: ABANDONO DE COLA DE EMPAREJAMIENTO ===
+    socket.on('leave_matchmaking', (payload) => {
+        const playerId = (payload && payload.playerId) || socket.playerId;
+        console.log(`[MATCHMAKING] Solicitud de abandono de cola para PlayerID: ${playerId}`);
+
+        // 1. Si el socket tiene roomId asignado en sala no iniciada, sacarlo
+        if (socket.roomId && rooms[socket.roomId]) {
+            const room = rooms[socket.roomId];
+            if (!room.gameStarted) {
+                room.players = room.players.filter(p => p.playerId !== playerId && p.socketId !== socket.id);
+                socket.leave(socket.roomId);
+                
+                if (room.players.length === 0) {
+                    console.log(`[MATCHMAKING] Sala de espera ${socket.roomId} destruida (vacía).`);
+                    delete rooms[socket.roomId];
+                } else {
+                    room.players.forEach((p, idx) => { p.slotIndex = idx; });
+                    io.in(socket.roomId).emit('room_updated', {
+                        id: socket.roomId,
+                        players: room.players,
+                        targetPlayers: room.targetPlayers
+                    });
+                }
+                socket.roomId = null;
+            }
+        }
+
+        // 2. Barrer todas las salas públicas no iniciadas donde esté este playerId o socketId
+        for (const [rId, room] of Object.entries(rooms)) {
+            if (!room.gameStarted) {
+                const hadPlayer = room.players.some(p => p.playerId === playerId || p.socketId === socket.id);
+                if (hadPlayer) {
+                    room.players = room.players.filter(p => p.playerId !== playerId && p.socketId !== socket.id);
+                    socket.leave(rId);
+                    if (room.players.length === 0) {
+                        delete rooms[rId];
+                        console.log(`[MATCHMAKING] Sala de espera ${rId} eliminada.`);
+                    } else {
+                        room.players.forEach((p, idx) => { p.slotIndex = idx; });
+                        io.in(rId).emit('room_updated', {
+                            id: rId,
+                            players: room.players,
+                            targetPlayers: room.targetPlayers
+                        });
+                    }
+                }
+            }
+        }
+    });
+
+    // === LIMPIEZA AUTORITATIVA: ABANDONO EXPLÍCITO DE SALA ===
+    socket.on('intent_leave_room', (payload) => {
+        const roomId = (payload && payload.roomId) || socket.roomId;
+        const playerId = (payload && payload.playerId) || socket.playerId;
+        console.log(`[SALA] Solicitud explícita de abandono de sala ${roomId} para PlayerID: ${playerId}`);
+
+        if (roomId && rooms[roomId]) {
+            const room = rooms[roomId];
+            const player = room.players.find(p => p.playerId === playerId || p.socketId === socket.id);
+            if (player) {
+                player.isConnected = false;
+                player.isBot = true;
+                player.isExpelled = true;
+                
+                io.in(roomId).emit('room_updated', {
+                    id: roomId,
+                    players: room.players,
+                    targetPlayers: room.targetPlayers
+                });
+                io.in(roomId).emit('event_player_disconnected', {
+                    playerId: player.playerId
+                });
+                
+                const allDisconnected = room.players.every(p => p.isConnected === false);
+                if (allDisconnected || !room.gameStarted) {
+                    delete rooms[roomId];
+                    console.log(`[LIMPIEZA] Sala ${roomId} eliminada por abandono.`);
+                }
+            }
+            socket.leave(roomId);
+        }
+        if (socket.roomId === roomId) {
+            socket.roomId = null;
+        }
+    });
+
     socket.on('create_private_room', (payload) => {
         const { playerId, playerName, targetPlayers, mode } = payload;
         const roomId = generateUniqueRoomId();
