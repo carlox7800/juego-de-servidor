@@ -377,11 +377,14 @@ function clearRoomTurnTimer(room) {
 
 function checkAbandonmentCondition(room) {
     if (!room || !room.gameStarted) return false;
-    const activeHumans = room.players.filter(p => !p.isBot && p.isConnected && !p.isExpelled);
-    if (activeHumans.length <= 1) {
-        const winner = activeHumans[0];
+    // Un jugador sigue participando si no ha sido formalmente expulsado (!isExpelled)
+    const activeOrGracePlayers = room.players.filter(p => !p.isExpelled);
+    const connectedHumans = room.players.filter(p => !p.isBot && p.isConnected && !p.isExpelled);
+    
+    if (activeOrGracePlayers.length <= 1 && connectedHumans.length >= 1) {
+        const winner = connectedHumans[0];
         room.lastWinnerId = winner ? winner.playerId : '';
-        console.log(`[ABANDONO AUTORITATIVO] Sala ${room.id} terminada por falta de humanos conectados. Ganador: ${winner ? winner.playerId : 'Nadie'}`);
+        console.log(`[ABANDONO AUTORITATIVO] Sala ${room.id} terminada por abandono/expulsión de rivales. Ganador: ${winner ? winner.playerId : 'Nadie'}`);
         clearRoomTurnTimer(room);
         io.in(room.id).emit('event_game_over_by_abandonment', {
             winnerId: winner ? winner.playerId : ""
