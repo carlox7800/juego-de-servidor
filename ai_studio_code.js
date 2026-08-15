@@ -70,7 +70,7 @@ function hasBarrierAtSquare(perimeterIndex, tokens) {
   if (perimeterIndex < 0 || perimeterIndex >= 52) return false;
   let count = 0;
   tokens.forEach(tk => {
-    if (tk.step >= 1 && tk.step < 51) {
+    if (tk.step >= 0 && tk.step < 51) {
       const color = SQUARE_COLORS_ORDER[tk.playerId] || 'yellow';
       const pIdx = (getStartOffset(color, false) + tk.step) % 52;
       if (pIdx === perimeterIndex) count++;
@@ -122,7 +122,16 @@ function checkMoveValidAuthoritative(token, moveVal, tokens, totalPlayers) {
         return true;
       } else {
         const startIdx = getStartOffset(color, false);
-        return !hasBarrierAtSquare(startIdx, tokens);
+        let tokensOnStart = 0;
+        tokens.forEach(tk => {
+          if (tk.step >= 0 && tk.step < trackSteps) {
+            const oppColor = colorsOrder[tk.playerId];
+            const oppPIdx = (getStartOffset(oppColor, false) + tk.step) % perimeter;
+            if (oppPIdx === startIdx) tokensOnStart++;
+          }
+        });
+        // Si ya hay 2 fichas en la casilla de salida, no se puede salir (tope de 2 fichas por casilla)
+        return tokensOnStart < 2;
       }
     }
     return false;
@@ -130,7 +139,8 @@ function checkMoveValidAuthoritative(token, moveVal, tokens, totalPlayers) {
     const distanceToGoal = goalStep - token.step;
     if (moveVal > distanceToGoal) return false;
 
-    for (let stepOffset = 1; stepOffset <= moveVal; stepOffset++) {
+    // Verificar que no haya barreras intermedias
+    for (let stepOffset = 1; stepOffset < moveVal; stepOffset++) {
       const pathStep = token.step + stepOffset;
       if (isHex) {
         const pIndex = getCellIndexForToken(color, pathStep, true);
@@ -146,6 +156,39 @@ function checkMoveValidAuthoritative(token, moveVal, tokens, totalPlayers) {
         }
       }
     }
+
+    // Verificar la casilla final de destino (máximo 2 fichas por casilla)
+    const targetStep = token.step + moveVal;
+    if (isHex) {
+      if (targetStep <= 77) {
+        const pIndex = getCellIndexForToken(color, targetStep, true);
+        if (typeof pIndex === 'number') {
+          let countOnTarget = 0;
+          tokens.forEach(tk => {
+            if (tk.step > 0 && tk.step <= 77) {
+              const tkColor = colorsOrder[tk.playerId];
+              const tkIdx = getCellIndexForToken(tkColor, tk.step, true);
+              if (typeof tkIdx === 'number' && tkIdx === pIndex) countOnTarget++;
+            }
+          });
+          if (countOnTarget >= 2) return false;
+        }
+      }
+    } else {
+      if (targetStep < trackSteps) {
+        const pIndex = (getStartOffset(color, false) + targetStep) % perimeter;
+        let countOnTarget = 0;
+        tokens.forEach(tk => {
+          if (tk.step >= 0 && tk.step < trackSteps) {
+            const oppColor = colorsOrder[tk.playerId];
+            const oppPIdx = (getStartOffset(oppColor, false) + tk.step) % perimeter;
+            if (oppPIdx === pIndex) countOnTarget++;
+          }
+        });
+        if (countOnTarget >= 2) return false;
+      }
+    }
+
     return true;
   }
   return false;
@@ -158,13 +201,14 @@ function getPlayableTokenMovesAuthoritative(tokens, playerIdx, diceMoves, totalP
   const validChoices = [];
   const isHex = totalPlayers > 4;
   const goalStep = getGoalStep(isHex);
+  const baseTargetStep = isHex ? 1 : 0;
 
   playerTokens.forEach(token => {
     // 1. Movimientos individuales
     diceMoves.forEach(m => {
       if (token.step === -1) {
         if (m === 5 && checkMoveValidAuthoritative(token, 5, tokens, totalPlayers)) {
-          validChoices.push({ token, moveVal: 5, targetStep: 1, isSum: false });
+          validChoices.push({ token, moveVal: 5, targetStep: baseTargetStep, isSum: false });
         }
       } else if (token.step >= 0 && token.step < goalStep) {
         if (checkMoveValidAuthoritative(token, m, tokens, totalPlayers)) {
@@ -178,7 +222,7 @@ function getPlayableTokenMovesAuthoritative(tokens, playerIdx, diceMoves, totalP
       const sum = diceMoves[0] + diceMoves[1];
       if (token.step === -1) {
         if (sum === 5 && checkMoveValidAuthoritative(token, 5, tokens, totalPlayers)) {
-          validChoices.push({ token, moveVal: sum, targetStep: 1, isSum: true });
+          validChoices.push({ token, moveVal: sum, targetStep: baseTargetStep, isSum: true });
         }
       } else if (token.step >= 0 && token.step < goalStep) {
         if (checkMoveValidAuthoritative(token, sum, tokens, totalPlayers)) {
@@ -273,15 +317,15 @@ function evaluateMoveRulesAuthoritative(tokens, movingTokenIndex, movingPlayerId
     }
   } else {
     // Tablero Estándar (Cuadrado 2, 3, 4 jugadores)
-    if (targetStep >= 1 && targetStep < trackSteps) {
+    if (targetStep >= 0 && targetStep < trackSteps) {
       const pIndex = (getStartOffset(color, false) + targetStep) % perimeter;
-      const isStartCell = [1, 14, 27, 40, 53, 66].includes(pIndex);
+      const isStartCell = [0, 13, 26, 39].includes(pIndex) || [1, 14, 27, 40, 53, 66].includes(pIndex);
       const isGoldStar = STAR_CELLS_SQUARE.includes(pIndex);
 
-      if (targetStep === 1) {
-        // Expulsión por Salida Obligatoria
+      if (targetStep === 0) {
+        // Salida a casilla propia
         const cellTokens = tokens.filter(t => {
-          if (t.step < 1 || t.step >= trackSteps) return false;
+          if (t.step < 0 || t.step >= trackSteps) return false;
           const oppColor = currentColorsOrder[t.playerId];
           const oppPIndex = (getStartOffset(oppColor, false) + t.step) % perimeter;
           return oppPIndex === pIndex;
@@ -295,7 +339,7 @@ function evaluateMoveRulesAuthoritative(tokens, movingTokenIndex, movingPlayerId
       } else if (!isStartCell && !isGoldStar) {
         // Captura Normal
         const enemyTokens = tokens.filter(t => {
-          if (t.playerId === movingPlayerIdx || t.step < 1 || t.step >= trackSteps) return false;
+          if (t.playerId === movingPlayerIdx || t.step < 0 || t.step >= trackSteps) return false;
           const oppColor = currentColorsOrder[t.playerId];
           const oppPIndex = (getStartOffset(oppColor, false) + t.step) % perimeter;
           return oppPIndex === pIndex;
@@ -375,7 +419,7 @@ function clearRoomTurnTimer(room) {
     }
 }
 
-function checkAbandonmentCondition(room) {
+function checkAbandonmentCondition(room, reason = 'voluntary') {
     if (!room || !room.gameStarted) return false;
     // Un jugador sigue participando si no ha sido formalmente expulsado (!isExpelled)
     const activeOrGracePlayers = room.players.filter(p => !p.isExpelled);
@@ -384,10 +428,11 @@ function checkAbandonmentCondition(room) {
     if (activeOrGracePlayers.length <= 1 && connectedHumans.length >= 1) {
         const winner = connectedHumans[0];
         room.lastWinnerId = winner ? winner.playerId : '';
-        console.log(`[ABANDONO AUTORITATIVO] Sala ${room.id} terminada por abandono/expulsión de rivales. Ganador: ${winner ? winner.playerId : 'Nadie'}`);
+        console.log(`[ABANDONO AUTORITATIVO] Sala ${room.id} terminada (Motivo: ${reason}). Ganador: ${winner ? winner.playerId : 'Nadie'}`);
         clearRoomTurnTimer(room);
         io.in(room.id).emit('event_game_over_by_abandonment', {
-            winnerId: winner ? winner.playerId : ""
+            winnerId: winner ? winner.playerId : "",
+            reason: reason
         });
         return true;
     }
@@ -400,7 +445,7 @@ function startRoomTurnAuthoritative(roomId, explicitSlotIndex) {
 
     clearRoomTurnTimer(room);
 
-    if (checkAbandonmentCondition(room)) return;
+    if (checkAbandonmentCondition(room, 'voluntary')) return;
 
     const totalSlots = room.players.length;
     const isHex = (room.targetPlayers || totalSlots) > 4;
@@ -546,6 +591,7 @@ function executeBotTurnSequenceAuthoritative(roomId, playerId) {
         }
 
         const token = currentRoom.tokens.find(t => t.playerId === pIdx && t.id === choice.token.id);
+        const oldStep = token ? token.step : -1;
         if (token) {
             token.step = choice.targetStep;
             currentRoom.lastMovedTokenMap[playerId] = choice.token.id;
@@ -584,6 +630,10 @@ function executeBotTurnSequenceAuthoritative(roomId, playerId) {
             else if (movesLeft.length > 0) movesLeft.shift();
         }
 
+        // Calcular la duración exacta de la caminata visual del cliente (250ms por paso + 800ms de pausa de aterrizaje)
+        const animSteps = (oldStep < 0) ? 1 : Math.max(1, choice.targetStep - oldStep);
+        const movePauseMs = (animSteps * 250) + 800;
+
         currentRoom.turnTimeoutHandle = setTimeout(() => {
             const nextPlayables = getPlayableTokenMovesAuthoritative(currentRoom.tokens, pIdx, movesLeft, totalPlayers);
             if (movesLeft.length > 0 && nextPlayables.length > 0) {
@@ -599,7 +649,7 @@ function executeBotTurnSequenceAuthoritative(roomId, playerId) {
                 movesLeft = [bonusSteps];
                 currentRoom.turnTimeoutHandle = setTimeout(() => {
                     runBotMoveStep();
-                }, 1000);
+                }, 1200);
             } else if (d1 === d2) {
                 console.log(`[BOT AUTORITATIVO] Bot repite turno por dobles.`);
                 currentRoom.turnTimeoutHandle = setTimeout(() => {
@@ -610,12 +660,12 @@ function executeBotTurnSequenceAuthoritative(roomId, playerId) {
                     advanceTurnAuthoritative(roomId);
                 }, 600);
             }
-        }, 700);
+        }, movePauseMs);
     }
 
     room.turnTimeoutHandle = setTimeout(() => {
         runBotMoveStep();
-    }, 600);
+    }, 1200);
 }
 
 function advanceTurnAuthoritative(roomId, explicitSlotIndex) {
@@ -639,12 +689,12 @@ function advanceTurnAuthoritative(roomId, explicitSlotIndex) {
 
                 io.in(roomId).emit('event_player_expelled', { playerId: prevPlayer.playerId });
 
-                if (checkAbandonmentCondition(room)) return;
+                if (checkAbandonmentCondition(room, 'inactivity')) return;
             }
         }
     }
 
-    if (checkAbandonmentCondition(room)) return;
+    if (checkAbandonmentCondition(room, 'voluntary')) return;
 
     // 2. Determinar el siguiente turno
     const totalSlots = room.players.length;
