@@ -970,6 +970,24 @@ io.on('connection', (socket) => {
             console.log(`[RECONEXIÓN] Jugador ${playerId} volvió a sala privada ${cleanRoomCode}`);
             
             if (wasOffline && room.gameStarted) {
+                const activePlayer = room.players[room.currentTurnSlot];
+                if (activePlayer && (activePlayer.playerId === playerId || activePlayer.playerId === existingPlayer.playerId)) {
+                    console.log(`[RECONEXIÓN] Turno activo devuelto de inmediato al humano ${playerId} en sala privada ${cleanRoomCode}.`);
+                    clearRoomTurnTimer(room);
+                    io.in(cleanRoomCode).emit('event_turn_started', {
+                        playerId: playerId,
+                        activePlayerId: playerId,
+                        turnDurationSeconds: 15
+                    });
+                    room.turnTimeoutHandle = setTimeout(() => {
+                        console.log(`[TIMEOUT AUTORITATIVO] Jugador reconectado ${playerId} agotó sus 15s.`);
+                        io.in(cleanRoomCode).emit('event_turn_timeout', { playerId: playerId });
+                        room.turnTimeoutHandle = setTimeout(() => {
+                            executeBotTurnSequenceAuthoritative(cleanRoomCode, playerId);
+                        }, 800);
+                    }, 15000);
+                }
+
                 io.in(cleanRoomCode).emit('event_player_reconnected', {
                     playerId: playerId
                 });
@@ -1033,6 +1051,24 @@ io.on('connection', (socket) => {
                 });
                 
                 if (wasOffline && room.gameStarted) {
+                    const activePlayer = room.players[room.currentTurnSlot];
+                    if (activePlayer && (activePlayer.playerId === playerId || activePlayer.playerId === player.playerId)) {
+                        console.log(`[RECONEXIÓN] Turno activo devuelto de inmediato al humano ${playerId} en sala ${roomId}.`);
+                        clearRoomTurnTimer(room);
+                        io.in(roomId).emit('event_turn_started', {
+                            playerId: playerId,
+                            activePlayerId: playerId,
+                            turnDurationSeconds: 15
+                        });
+                        room.turnTimeoutHandle = setTimeout(() => {
+                            console.log(`[TIMEOUT AUTORITATIVO] Jugador reconectado ${playerId} agotó sus 15s.`);
+                            io.in(roomId).emit('event_turn_timeout', { playerId: playerId });
+                            room.turnTimeoutHandle = setTimeout(() => {
+                                executeBotTurnSequenceAuthoritative(roomId, playerId);
+                            }, 800);
+                        }, 15000);
+                    }
+
                     io.in(roomId).emit('event_player_reconnected', {
                         playerId: playerId
                     });
