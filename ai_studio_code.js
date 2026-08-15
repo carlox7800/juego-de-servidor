@@ -1168,20 +1168,35 @@ io.on('connection', (socket) => {
 
     socket.on('intent_roll_dice', (payload) => {
         const { roomId, playerId } = payload;
-        const d1 = Math.floor(Math.random() * 6) + 1;
-        const d2 = Math.floor(Math.random() * 6) + 1;
-        
         const room = rooms[roomId];
 
-        if (room) {
-            clearRoomTurnTimer(room);
+        if (!room || !room.gameStarted) {
+            console.log(`[AUTORITATIVO] 🚫 Rechazado intent_roll_dice: Sala ${roomId} no existe o no ha iniciado.`);
+            return;
+        }
 
-            room.currentTurnDice = {
-                playerId: playerId,
-                diceValues: [d1, d2],
-                remainingMoves: [d1, d2],
-                hasRolled: true
-            };
+        const activePlayer = room.players[room.currentTurnSlot];
+        if (!activePlayer || activePlayer.playerId !== playerId) {
+            console.log(`[AUTORITATIVO] 🚫 Rechazado intent_roll_dice: Jugador ${playerId} no es el turno activo (${activePlayer ? activePlayer.playerId : 'nadie'}).`);
+            return;
+        }
+
+        if (room.currentTurnDice && room.currentTurnDice.hasRolled) {
+            console.log(`[AUTORITATIVO] 🚫 Rechazado intent_roll_dice: Jugador ${playerId} ya lanzó los dados en este turno.`);
+            return;
+        }
+
+        const d1 = Math.floor(Math.random() * 6) + 1;
+        const d2 = Math.floor(Math.random() * 6) + 1;
+
+        clearRoomTurnTimer(room);
+
+        room.currentTurnDice = {
+            playerId: playerId,
+            diceValues: [d1, d2],
+            remainingMoves: [d1, d2],
+            hasRolled: true
+        };
 
             if (room.consecutiveDoublesMap) {
                 if (d1 === d2) {
