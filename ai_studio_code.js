@@ -471,6 +471,13 @@ function startRoomTurnAuthoritative(roomId, explicitSlotIndex) {
     const activePlayer = room.players[targetSlot];
     if (!activePlayer) return;
 
+    room.currentTurnDice = {
+        playerId: activePlayer.playerId,
+        diceValues: null,
+        remainingMoves: [],
+        hasRolled: false
+    };
+
     console.log(`[TURNO AUTORITATIVO] Sala ${roomId} -> Slot ${targetSlot} (${activePlayer.playerId}) [Bot: ${!!activePlayer.isBot}, Connected: ${activePlayer.isConnected}]`);
 
     io.in(roomId).emit('event_turn_started', {
@@ -541,6 +548,13 @@ function executeBotTurnSequenceAuthoritative(roomId, playerId) {
                 }
             }
 
+            room.currentTurnDice = {
+                playerId: playerId,
+                diceValues: [d1, d2],
+                remainingMoves: [d1, d2],
+                hasRolled: true
+            };
+
             io.in(roomId).emit('event_dice_result', {
                 playerId: playerId,
                 diceRoll1: d1,
@@ -556,6 +570,13 @@ function executeBotTurnSequenceAuthoritative(roomId, playerId) {
     } else {
         room.consecutiveDoublesMap[playerId] = 0;
     }
+
+    room.currentTurnDice = {
+        playerId: playerId,
+        diceValues: [d1, d2],
+        remainingMoves: [d1, d2],
+        hasRolled: true
+    };
 
     io.in(roomId).emit('event_dice_result', {
         playerId: playerId,
@@ -627,10 +648,12 @@ function executeBotTurnSequenceAuthoritative(roomId, playerId) {
 
         if (choice.isSum) {
             movesLeft = [];
+            if (currentRoom.currentTurnDice) currentRoom.currentTurnDice.remainingMoves = [];
         } else {
             const idx = movesLeft.indexOf(choice.moveVal);
             if (idx !== -1) movesLeft.splice(idx, 1);
             else if (movesLeft.length > 0) movesLeft.shift();
+            if (currentRoom.currentTurnDice) currentRoom.currentTurnDice.remainingMoves = [...movesLeft];
         }
 
         // Calcular la duración exacta de la caminata visual del cliente (250ms por paso + 800ms de pausa de aterrizaje)
@@ -650,6 +673,7 @@ function executeBotTurnSequenceAuthoritative(roomId, playerId) {
                     diceValues: [bonusSteps]
                 });
                 movesLeft = [bonusSteps];
+                if (currentRoom.currentTurnDice) currentRoom.currentTurnDice.remainingMoves = [bonusSteps];
                 currentRoom.turnTimeoutHandle = setTimeout(() => {
                     runBotMoveStep();
                 }, 1200);
@@ -690,7 +714,7 @@ function advanceTurnAuthoritative(roomId, explicitSlotIndex) {
                 prevPlayer.isExpelled = true;
                 prevPlayer.isBot = true;
 
-                io.in(roomId).emit('event_player_expelled', { playerId: prevPlayer.playerId });
+                io.in(roomId).emit('event_player_expelled', { playerId: prevPlayer.playerId, reason: 'inactivity' });
 
                 if (checkAbandonmentCondition(room, 'inactivity')) return;
             }
@@ -778,17 +802,22 @@ io.on('connection', (socket) => {
         }
 
         const room = rooms[foundRoomId];
-        if (!room.players.find(p => p.playerId === playerId)) {
-            room.players.push({ 
-                playerId, 
-                playerName, 
+        const existingPlayer = room.players.find(p => p.playerId === playerId);
+        if (!existingPlayer) {
+            room.players.push({
+                playerId,
+                playerName,
                 socketId: socket.id,
                 isConnected: true,
                 isBot: false,
                 slotIndex: room.players.length
             });
+        } else {
+            existingPlayer.socketId = socket.id;
+            existingPlayer.isConnected = true;
+            existingPlayer.isBot = false;
         }
-        
+
         socket.join(foundRoomId);
         socket.roomId = foundRoomId;
         socket.playerId = playerId;
@@ -799,7 +828,7 @@ io.on('connection', (socket) => {
             targetPlayers: room.targetPlayers
         });
 
-        if (room.players.length === room.targetPlayers && !room.gameStarted) {
+        if (room.players.length === room.targetPlayers) {
             room.gameStarted = true;
             room.currentTurnSlot = 0;
             
@@ -813,31 +842,27 @@ io.on('connection', (socket) => {
 
             setTimeout(() => {
                 startRoomTurnAuthoritative(foundRoomId, 0);
-            }, 1000);
+            }, 3500);
         }
     });
 
     socket.on('leave_matchmaking', (payload) => {
         const playerId = (payload && payload.playerId) || socket.playerId;
-        console.log(`[MATCHMAKING] Abandono de cola para PlayerID: ${playerId}`);
-
-        if (socket.roomId && rooms[socket.roomId]) {
-            const room = rooms[socket.roomId];
-            if (!room.gameStarted) {
-                room.players = room.players.filter(p => p.playerId !== playerId && p.socketId !== socket.id);
-                socket.leave(socket.roomId);
-                
-                if (room.players.length === 0) {
-                    delete rooms[socket.roomId];
-                } else {
-                    room.players.forEach((p, idx) => { p.slotIndex = idx; });
-                    io.in(socket.roomId).emit('room_updated', {
-                        id: socket.roomId,
-                        players: room.players,
-                        targetPlayers: room.targetPlayers
-                    });
-                }
-                socket.roomId = null;
+        console.log(`[MATCHMAKING] leave_matchmaking recibido para PlayerID: ${playerId}`);
+        
+        if (socket.roomId && rooms[socket.roomId] && !rooms[socket.roomId].gameStarted) {
+            const rId = socket.roomId;
+            rooms[rId].players = rooms[rId].players.filter(p => p.playerId !== playerId && p.socketId !== socket.id);
+            socket.leave(rId);
+            if (rooms[rId].players.length === 0) {
+                delete rooms[rId];
+            } else {
+                rooms[rId].players.forEach((p, idx) => { p.slotIndex = idx; });
+                io.in(rId).emit('room_updated', {
+                    id: rId,
+                    players: rooms[rId].players,
+                    targetPlayers: rooms[rId].targetPlayers
+                });
             }
         }
 
@@ -887,11 +912,12 @@ io.on('connection', (socket) => {
                     isExpelled: true
                 });
                 io.in(roomId).emit('event_player_expelled', {
-                    playerId: player.playerId
+                    playerId: player.playerId,
+                    reason: 'voluntary'
                 });
                 
                 if (room.gameStarted) {
-                    if (checkAbandonmentCondition(room)) {
+                    if (checkAbandonmentCondition(room, 'voluntary')) {
                         return;
                     }
                     if (room.players[room.currentTurnSlot]?.playerId === player.playerId) {
@@ -952,7 +978,7 @@ io.on('connection', (socket) => {
         const room = rooms[cleanRoomCode];
 
         if (!room || !room.isPrivate) {
-            socket.emit('event_room_expired', { roomId: cleanRoomCode, reason: "Sala ya no existe" });
+            socket.emit('event_room_expired', { roomId: cleanRoomCode, reason: "inactivity", isSelfExpelled: true });
             socket.emit('room_error', { message: "Sala privada no encontrada" });
             return;
         }
@@ -972,32 +998,56 @@ io.on('connection', (socket) => {
                 slotIndex: room.players.length
             });
         } else {
+            if (existingPlayer.isExpelled) {
+                console.log(`[RECONEXIÓN TARDÍA] Jugador ${playerId} previamente expulsado de sala privada ${cleanRoomCode}.`);
+                socket.emit('event_game_over_by_abandonment', {
+                    winnerId: room.lastWinnerId || '',
+                    reason: 'inactivity',
+                    isSelfExpelled: true
+                });
+                return;
+            }
+
             const wasOffline = !existingPlayer.isConnected || existingPlayer.isBot;
             existingPlayer.socketId = socket.id;
             existingPlayer.isConnected = true;
-            if (!existingPlayer.isExpelled) {
-                existingPlayer.isBot = false;
-                delete existingPlayer._graceTurnsLeft;
-            }
+            existingPlayer.isBot = false;
+            delete existingPlayer._graceTurnsLeft;
             console.log(`[RECONEXIÓN] Jugador ${playerId} volvió a sala privada ${cleanRoomCode}`);
             
             if (wasOffline && room.gameStarted) {
                 const activePlayer = room.players[room.currentTurnSlot];
                 if (activePlayer && (activePlayer.playerId === playerId || activePlayer.playerId === existingPlayer.playerId)) {
-                    console.log(`[RECONEXIÓN] Turno activo devuelto de inmediato al humano ${playerId} en sala privada ${cleanRoomCode}.`);
                     clearRoomTurnTimer(room);
-                    io.in(cleanRoomCode).emit('event_turn_started', {
-                        playerId: playerId,
-                        activePlayerId: playerId,
-                        turnDurationSeconds: 15
-                    });
-                    room.turnTimeoutHandle = setTimeout(() => {
-                        console.log(`[TIMEOUT AUTORITATIVO] Jugador reconectado ${playerId} agotó sus 15s.`);
-                        io.in(cleanRoomCode).emit('event_turn_timeout', { playerId: playerId });
+                    if (room.currentTurnDice && room.currentTurnDice.hasRolled && room.currentTurnDice.remainingMoves && room.currentTurnDice.remainingMoves.length > 0) {
+                        console.log(`[RECONEXIÓN A MITAD DE TURNO] Turno devuelto a ${playerId} en sala privada con jugadas pendientes: [${room.currentTurnDice.remainingMoves.join(', ')}]`);
+                        io.in(cleanRoomCode).emit('event_dice_result', {
+                            playerId: playerId,
+                            diceValues: room.currentTurnDice.diceValues,
+                            remainingMoves: room.currentTurnDice.remainingMoves
+                        });
                         room.turnTimeoutHandle = setTimeout(() => {
-                            executeBotTurnSequenceAuthoritative(cleanRoomCode, playerId);
-                        }, 800);
-                    }, 15000);
+                            console.log(`[TIMEOUT AUTORITATIVO] Jugador reconectado ${playerId} agotó sus 15s.`);
+                            io.in(cleanRoomCode).emit('event_turn_timeout', { playerId: playerId });
+                            room.turnTimeoutHandle = setTimeout(() => {
+                                executeBotTurnSequenceAuthoritative(cleanRoomCode, playerId);
+                            }, 800);
+                        }, 15000);
+                    } else {
+                        console.log(`[RECONEXIÓN] Turno activo devuelto de inmediato al humano ${playerId} en sala privada ${cleanRoomCode}.`);
+                        io.in(cleanRoomCode).emit('event_turn_started', {
+                            playerId: playerId,
+                            activePlayerId: playerId,
+                            turnDurationSeconds: 15
+                        });
+                        room.turnTimeoutHandle = setTimeout(() => {
+                            console.log(`[TIMEOUT AUTORITATIVO] Jugador reconectado ${playerId} agotó sus 15s.`);
+                            io.in(cleanRoomCode).emit('event_turn_timeout', { playerId: playerId });
+                            room.turnTimeoutHandle = setTimeout(() => {
+                                executeBotTurnSequenceAuthoritative(cleanRoomCode, playerId);
+                            }, 800);
+                        }, 15000);
+                    }
                 }
 
                 io.in(cleanRoomCode).emit('event_player_reconnected', {
@@ -1047,13 +1097,21 @@ io.on('connection', (socket) => {
         if (room && room.players) {
             const player = room.players.find(p => p.playerId === playerId);
             if (player) {
+                if (player.isExpelled) {
+                    console.log(`[RECONEXIÓN TARDÍA] Jugador ${playerId} ya fue expulsado de sala ${roomId}.`);
+                    socket.emit('event_game_over_by_abandonment', {
+                        winnerId: room.lastWinnerId || '',
+                        reason: 'inactivity',
+                        isSelfExpelled: true
+                    });
+                    return;
+                }
+
                 const wasOffline = !player.isConnected || player.isBot;
                 player.socketId = socket.id;
                 player.isConnected = true;
-                if (!player.isExpelled) {
-                    player.isBot = false;
-                    delete player._graceTurnsLeft;
-                }
+                player.isBot = false;
+                delete player._graceTurnsLeft;
                 console.log(`[RECONEXIÓN] Jugador ${playerId} volvió a sala ${roomId} (socket: ${socket.id})`);
                 
                 io.in(roomId).emit('room_updated', {
@@ -1065,20 +1123,36 @@ io.on('connection', (socket) => {
                 if (wasOffline && room.gameStarted) {
                     const activePlayer = room.players[room.currentTurnSlot];
                     if (activePlayer && (activePlayer.playerId === playerId || activePlayer.playerId === player.playerId)) {
-                        console.log(`[RECONEXIÓN] Turno activo devuelto de inmediato al humano ${playerId} en sala ${roomId}.`);
                         clearRoomTurnTimer(room);
-                        io.in(roomId).emit('event_turn_started', {
-                            playerId: playerId,
-                            activePlayerId: playerId,
-                            turnDurationSeconds: 15
-                        });
-                        room.turnTimeoutHandle = setTimeout(() => {
-                            console.log(`[TIMEOUT AUTORITATIVO] Jugador reconectado ${playerId} agotó sus 15s.`);
-                            io.in(roomId).emit('event_turn_timeout', { playerId: playerId });
+                        if (room.currentTurnDice && room.currentTurnDice.hasRolled && room.currentTurnDice.remainingMoves && room.currentTurnDice.remainingMoves.length > 0) {
+                            console.log(`[RECONEXIÓN A MITAD DE TURNO] Turno devuelto a ${playerId} con jugadas pendientes: [${room.currentTurnDice.remainingMoves.join(', ')}]`);
+                            io.in(roomId).emit('event_dice_result', {
+                                playerId: playerId,
+                                diceValues: room.currentTurnDice.diceValues,
+                                remainingMoves: room.currentTurnDice.remainingMoves
+                            });
                             room.turnTimeoutHandle = setTimeout(() => {
-                                executeBotTurnSequenceAuthoritative(roomId, playerId);
-                            }, 800);
-                        }, 15000);
+                                console.log(`[TIMEOUT AUTORITATIVO] Jugador reconectado ${playerId} no completó su jugada en 15s.`);
+                                io.in(roomId).emit('event_turn_timeout', { playerId: playerId });
+                                room.turnTimeoutHandle = setTimeout(() => {
+                                    executeBotTurnSequenceAuthoritative(roomId, playerId);
+                                }, 800);
+                            }, 15000);
+                        } else {
+                            console.log(`[RECONEXIÓN] Turno activo devuelto de inmediato al humano ${playerId} en sala ${roomId}.`);
+                            io.in(roomId).emit('event_turn_started', {
+                                playerId: playerId,
+                                activePlayerId: playerId,
+                                turnDurationSeconds: 15
+                            });
+                            room.turnTimeoutHandle = setTimeout(() => {
+                                console.log(`[TIMEOUT AUTORITATIVO] Jugador reconectado ${playerId} agotó sus 15s.`);
+                                io.in(roomId).emit('event_turn_timeout', { playerId: playerId });
+                                room.turnTimeoutHandle = setTimeout(() => {
+                                    executeBotTurnSequenceAuthoritative(roomId, playerId);
+                                }, 800);
+                            }, 15000);
+                        }
                     }
 
                     io.in(roomId).emit('event_player_reconnected', {
@@ -1088,7 +1162,7 @@ io.on('connection', (socket) => {
                 }
             }
         } else {
-            socket.emit('event_room_expired', { roomId: roomId, reason: "Sala ya no existe" });
+            socket.emit('event_room_expired', { roomId: roomId, reason: "inactivity", isSelfExpelled: true, message: "Has sido desconectado por inactividad" });
         }
     });
 
@@ -1101,6 +1175,13 @@ io.on('connection', (socket) => {
 
         if (room) {
             clearRoomTurnTimer(room);
+
+            room.currentTurnDice = {
+                playerId: playerId,
+                diceValues: [d1, d2],
+                remainingMoves: [d1, d2],
+                hasRolled: true
+            };
 
             if (room.consecutiveDoublesMap) {
                 if (d1 === d2) {
@@ -1198,6 +1279,13 @@ io.on('connection', (socket) => {
                             room.pendingBonusMap[playerId] -= bonusToDeduct;
                         }
                     }
+                }
+
+                if (room.currentTurnDice && room.currentTurnDice.remainingMoves) {
+                    const dist = (oldStep < 0) ? (isHex ? 1 : 5) : (newPathIndex - oldStep);
+                    const mIdx = room.currentTurnDice.remainingMoves.indexOf(dist);
+                    if (mIdx !== -1) room.currentTurnDice.remainingMoves.splice(mIdx, 1);
+                    else if (room.currentTurnDice.remainingMoves.length > 0) room.currentTurnDice.remainingMoves.shift();
                 }
 
                 const { updatedTokens, capturedTokens, bonusSteps } = evaluateMoveRulesAuthoritative(
