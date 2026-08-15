@@ -392,16 +392,19 @@ function initializeRoomStateAuthoritative(room) {
     room.pendingBonusMap = {};
     room.forceNextTurnAfterPenaltyMap = {};
 
+    const colorsOrder = isHex ? HEX_COLORS_ORDER : SQUARE_COLORS_ORDER;
     room.players.forEach((player, pIdx) => {
         room.consecutiveDoublesMap[player.playerId] = 0;
         room.lastMovedTokenMap[player.playerId] = null;
         room.pendingBonusMap[player.playerId] = 0;
+        const playerColor = colorsOrder[pIdx] || 'yellow';
 
         for (let tId = 0; tId < tokensPerPlayer; tId++) {
             room.tokens.push({
                 id: tId,
                 playerId: pIdx,
                 networkPlayerId: player.playerId,
+                color: playerColor,
                 step: -1
             });
         }
@@ -710,6 +713,7 @@ function advanceTurnAuthoritative(roomId, explicitSlotIndex) {
 function sendStateResyncDirect(socket, room) {
     if (!room || !room.gameStarted) return;
     const isHex = (room.targetPlayers || room.players.length) > 4;
+    const colorsOrder = isHex ? HEX_COLORS_ORDER : SQUARE_COLORS_ORDER;
     const goalStep = getGoalStep(isHex);
     
     const finishedIndices = [];
@@ -723,8 +727,16 @@ function sendStateResyncDirect(socket, room) {
     const activePlayer = room.players[room.currentTurnSlot];
     const currentTurnPlayerId = activePlayer ? activePlayer.playerId : '';
 
+    const enrichedTokens = (room.tokens || []).map(tk => ({
+        id: tk.id,
+        playerId: tk.playerId,
+        networkPlayerId: tk.networkPlayerId,
+        color: tk.color || colorsOrder[tk.playerId] || 'yellow',
+        step: typeof tk.step === 'number' ? tk.step : -1
+    }));
+
     socket.emit('event_state_resynced', {
-        tokens: room.tokens || [],
+        tokens: enrichedTokens,
         currentTurn: currentTurnPlayerId,
         currentTurnSlot: room.currentTurnSlot,
         finishedIndices
