@@ -32,7 +32,7 @@ const HEX_COLOR_INFO = {
 };
 
 const STAR_CELLS_HEX = [2, 8, 15, 21, 28, 34, 41, 47, 54, 60, 67, 73];
-const STAR_CELLS_SQUARE = [8, 21, 34, 47, 60, 73];
+const STAR_CELLS_SQUARE = [1, 8, 14, 21, 27, 34, 40, 47];
 
 function getTrackSteps(isHex) { return isHex ? 77 : 51; }
 function getGoalStep(isHex) { return isHex ? 82 : 56; }
@@ -319,7 +319,6 @@ function evaluateMoveRulesAuthoritative(tokens, movingTokenIndex, movingPlayerId
     // Tablero Estándar (Cuadrado 2, 3, 4 jugadores)
     if (targetStep >= 0 && targetStep < trackSteps) {
       const pIndex = (getStartOffset(color, false) + targetStep) % perimeter;
-      const isStartCell = [0, 13, 26, 39].includes(pIndex) || [1, 14, 27, 40, 53, 66].includes(pIndex);
       const isGoldStar = STAR_CELLS_SQUARE.includes(pIndex);
 
       if (targetStep === 0) {
@@ -330,14 +329,15 @@ function evaluateMoveRulesAuthoritative(tokens, movingTokenIndex, movingPlayerId
           const oppPIndex = (getStartOffset(oppColor, false) + t.step) % perimeter;
           return oppPIndex === pIndex;
         });
+        const myTokens = cellTokens.filter(t => t.playerId === movingPlayerIdx);
         const enemyTokens = cellTokens.filter(t => t.playerId !== movingPlayerIdx);
-        if (enemyTokens.length > 0) {
+        if (enemyTokens.length > 0 && (myTokens.length >= 1 || cellTokens.length >= 2)) {
           isExpulsion = true;
           capturedTokens = enemyTokens;
           bonusSteps += 0;
         }
-      } else if (!isStartCell && !isGoldStar) {
-        // Captura Normal
+      } else if (!isGoldStar) {
+        // Captura Normal en cualquier casilla que no sea estrella de seguridad
         const enemyTokens = tokens.filter(t => {
           if (t.playerId === movingPlayerIdx || t.step < 0 || t.step >= trackSteps) return false;
           const oppColor = currentColorsOrder[t.playerId];
