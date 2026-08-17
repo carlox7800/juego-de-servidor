@@ -1263,6 +1263,9 @@ io.on('connection', (socket) => {
         const { roomId, playerId, tokenId, newPathIndex, isBotMove } = payload;
 
         const room = rooms[roomId];
+        if (room) {
+            clearRoomTurnTimer(room);
+        }
 
         if (room && room.forceNextTurnAfterPenaltyMap && room.forceNextTurnAfterPenaltyMap[playerId]) {
             console.log(`[AUTORITATIVO] 🚫 Veto de movimiento: Jugador ${playerId} intentó mover durante secuencia de penalización.`);
@@ -1351,6 +1354,18 @@ io.on('connection', (socket) => {
                 });
             });
         }
+
+        // Si el jugador humano aún tiene jugadas o bonos pendientes en su turno, reiniciar temporizador de 15s
+        if (room && !isBotMove) {
+            const hasRemainingMoves = room.currentTurnDice && room.currentTurnDice.remainingMoves && room.currentTurnDice.remainingMoves.length > 0;
+            const hasPendingBonus = room.pendingBonusMap && room.pendingBonusMap[playerId] > 0;
+            if (hasRemainingMoves || hasPendingBonus) {
+                room.turnTimeoutHandle = setTimeout(() => {
+                    console.log(`[TIMEOUT MOVIMIENTO] Humano ${playerId} no completó sus jugadas restantes a tiempo. El bot suplirá la jugada.`);
+                    executeBotTurnSequenceAuthoritative(roomId, playerId);
+                }, 15000);
+            }
+        }
     });
 
     socket.on('intent_end_turn', (payload) => {
@@ -1371,6 +1386,12 @@ io.on('connection', (socket) => {
             room.pendingBonusMap[activePlayerId] = 0;
 
             console.log(`[AUTORITATIVO] 🛑 Reemitiendo dados por bonificación pendiente (+${bonusToAward}) a ${activePlayerId}`);
+
+            clearRoomTurnTimer(room);
+            room.turnTimeoutHandle = setTimeout(() => {
+                console.log(`[TIMEOUT MOVIMIENTO] Humano ${activePlayerId} no movió su bonificación a tiempo. El bot suplirá la jugada.`);
+                executeBotTurnSequenceAuthoritative(roomId, activePlayerId);
+            }, 15000);
 
             io.in(roomId).emit('event_dice_result', {
                 playerId: activePlayerId,
