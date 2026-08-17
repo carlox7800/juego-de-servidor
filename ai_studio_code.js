@@ -1306,8 +1306,13 @@ io.on('connection', (socket) => {
                 if (room.currentTurnDice && room.currentTurnDice.remainingMoves) {
                     const dist = (oldStep < 0) ? (isHex ? 1 : 5) : (newPathIndex - oldStep);
                     const mIdx = room.currentTurnDice.remainingMoves.indexOf(dist);
-                    if (mIdx !== -1) room.currentTurnDice.remainingMoves.splice(mIdx, 1);
-                    else if (room.currentTurnDice.remainingMoves.length > 0) room.currentTurnDice.remainingMoves.shift();
+                    if (mIdx !== -1) {
+                        room.currentTurnDice.remainingMoves.splice(mIdx, 1);
+                    } else if (room.currentTurnDice.remainingMoves.length === 2 && (room.currentTurnDice.remainingMoves[0] + room.currentTurnDice.remainingMoves[1] === dist)) {
+                        room.currentTurnDice.remainingMoves = [];
+                    } else if (room.currentTurnDice.remainingMoves.length > 0) {
+                        room.currentTurnDice.remainingMoves.shift();
+                    }
                 }
 
                 const { updatedTokens, capturedTokens, bonusSteps } = evaluateMoveRulesAuthoritative(
