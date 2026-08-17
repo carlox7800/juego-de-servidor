@@ -471,6 +471,10 @@ function startRoomTurnAuthoritative(roomId, explicitSlotIndex) {
     const activePlayer = room.players[targetSlot];
     if (!activePlayer) return;
 
+    if (room.forceNextTurnAfterPenaltyMap) {
+        room.forceNextTurnAfterPenaltyMap[activePlayer.playerId] = false;
+    }
+
     room.currentTurnDice = {
         playerId: activePlayer.playerId,
         diceValues: null,
@@ -1190,6 +1194,10 @@ io.on('connection', (socket) => {
         const d2 = Math.floor(Math.random() * 6) + 1;
 
         clearRoomTurnTimer(room);
+
+        if (room.forceNextTurnAfterPenaltyMap) {
+            room.forceNextTurnAfterPenaltyMap[playerId] = false;
+        }
 
         room.currentTurnDice = {
             playerId: playerId,
