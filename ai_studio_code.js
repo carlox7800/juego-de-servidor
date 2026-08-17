@@ -1237,12 +1237,11 @@ io.on('connection', (socket) => {
                 }
             }
 
-            // Temporizador de movimiento para humano (15s)
-            room.turnTimeoutHandle = setTimeout(() => {
-                console.log(`[TIMEOUT MOVIMIENTO] Humano ${playerId} no movió a tiempo. El bot suplirá la jugada.`);
-                executeBotTurnSequenceAuthoritative(roomId, playerId);
-            }, 15000);
-        }
+        // Temporizador de movimiento para humano (15s)
+        room.turnTimeoutHandle = setTimeout(() => {
+            console.log(`[TIMEOUT MOVIMIENTO] Humano ${playerId} no movió a tiempo. El bot suplirá la jugada.`);
+            executeBotTurnSequenceAuthoritative(roomId, playerId);
+        }, 15000);
 
         io.in(roomId).emit('event_dice_result', {
             playerId: playerId,
