@@ -101,7 +101,8 @@ function checkMoveValidAuthoritative(token, moveVal, tokens, totalPlayers) {
   const trackSteps = getTrackSteps(isHex);
   const perimeter = getTotalPerimeter(isHex);
 
-  if (token.step === -1) {
+  const isBase = isHex ? token.step <= 0 : token.step === -1;
+  if (isBase) {
     if (moveVal === 5) {
       if (isHex) {
         const startIdx = getCellIndexForToken(color, 1, true);
@@ -135,7 +136,7 @@ function checkMoveValidAuthoritative(token, moveVal, tokens, totalPlayers) {
       }
     }
     return false;
-  } else if (token.step >= 0 && token.step < goalStep) {
+  } else if (token.step >= (isHex ? 1 : 0) && token.step < goalStep) {
     const distanceToGoal = goalStep - token.step;
     if (moveVal > distanceToGoal) return false;
 
@@ -204,13 +205,14 @@ function getPlayableTokenMovesAuthoritative(tokens, playerIdx, diceMoves, totalP
   const baseTargetStep = isHex ? 1 : 0;
 
   playerTokens.forEach(token => {
+    const isBase = isHex ? token.step <= 0 : token.step === -1;
     // 1. Movimientos individuales
     diceMoves.forEach(m => {
-      if (token.step === -1) {
+      if (isBase) {
         if (m === 5 && checkMoveValidAuthoritative(token, 5, tokens, totalPlayers)) {
           validChoices.push({ token, moveVal: 5, targetStep: baseTargetStep, isSum: false });
         }
-      } else if (token.step >= 0 && token.step < goalStep) {
+      } else if (token.step >= (isHex ? 1 : 0) && token.step < goalStep) {
         if (checkMoveValidAuthoritative(token, m, tokens, totalPlayers)) {
           validChoices.push({ token, moveVal: m, targetStep: token.step + m, isSum: false });
         }
@@ -220,11 +222,11 @@ function getPlayableTokenMovesAuthoritative(tokens, playerIdx, diceMoves, totalP
     // 2. Movimiento combinado si hay 2 dados
     if (diceMoves.length === 2) {
       const sum = diceMoves[0] + diceMoves[1];
-      if (token.step === -1) {
+      if (isBase) {
         if (sum === 5 && checkMoveValidAuthoritative(token, 5, tokens, totalPlayers)) {
           validChoices.push({ token, moveVal: sum, targetStep: baseTargetStep, isSum: true });
         }
-      } else if (token.step >= 0 && token.step < goalStep) {
+      } else if (token.step >= (isHex ? 1 : 0) && token.step < goalStep) {
         if (checkMoveValidAuthoritative(token, sum, tokens, totalPlayers)) {
           validChoices.push({ token, moveVal: sum, targetStep: token.step + sum, isSum: true });
         }
@@ -1307,7 +1309,8 @@ io.on('connection', (socket) => {
                 }
 
                 if (room.currentTurnDice && room.currentTurnDice.remainingMoves) {
-                    const dist = (oldStep < 0) ? (isHex ? 1 : 5) : (newPathIndex - oldStep);
+                    const isBaseExit = (oldStep < 0 || (isHex && oldStep === 0));
+                    const dist = isBaseExit ? 5 : (newPathIndex - oldStep);
                     const mIdx = room.currentTurnDice.remainingMoves.indexOf(dist);
                     if (mIdx !== -1) {
                         room.currentTurnDice.remainingMoves.splice(mIdx, 1);
