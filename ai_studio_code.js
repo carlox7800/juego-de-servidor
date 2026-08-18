@@ -123,16 +123,20 @@ function checkMoveValidAuthoritative(token, moveVal, tokens, totalPlayers) {
         return true;
       } else {
         const startIdx = getStartOffset(color, false);
-        let tokensOnStart = 0;
+        let myCount = 0;
+        let enemyCount = 0;
         tokens.forEach(tk => {
           if (tk.step >= 0 && tk.step < trackSteps) {
             const oppColor = colorsOrder[tk.playerId];
             const oppPIdx = (getStartOffset(oppColor, false) + tk.step) % perimeter;
-            if (oppPIdx === startIdx) tokensOnStart++;
+            if (oppPIdx === startIdx) {
+              if (tk.playerId === token.playerId) myCount++;
+              else enemyCount++;
+            }
           }
         });
-        // Si ya hay 2 fichas en la casilla de salida, no se puede salir (tope de 2 fichas por casilla)
-        return tokensOnStart < 2;
+        // Solo se bloquea la salida si ya existen 2 fichas propias en la casilla de salida (barrera propia)
+        return myCount < 2;
       }
     }
     return false;
@@ -647,6 +651,7 @@ function executeBotTurnSequenceAuthoritative(roomId, playerId) {
                     playerId: enemyNetworkId,
                     tokenId: cToken.id,
                     newPathIndex: -1,
+                    captureCell: choice.targetStep,
                     isBotMove: false
                 });
             });
@@ -1353,6 +1358,7 @@ io.on('connection', (socket) => {
                     playerId: enemyNetworkId,
                     tokenId: cToken.id,
                     newPathIndex: -1,
+                    captureCell: newPathIndex,
                     isBotMove: false
                 });
             });
@@ -1409,10 +1415,6 @@ io.on('connection', (socket) => {
         if (explicitNetworkId) {
             const foundIdx = room.players.findIndex(p => p.playerId === explicitNetworkId);
             if (foundIdx !== -1) targetSlot = foundIdx;
-        } else if (nextPlayerId !== undefined || nextTurnId !== undefined) {
-            const colorIdToSlotIndex = { 0: 0, 2: 1, 1: 2, 3: 3, 4: 4, 5: 5 };
-            const parsedColorId = parseInt(nextPlayerId !== undefined ? nextPlayerId : nextTurnId, 10);
-            targetSlot = colorIdToSlotIndex[parsedColorId];
         }
 
         advanceTurnAuthoritative(roomId, targetSlot);
